@@ -7,16 +7,19 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import (
+    CLEAR,
     insert_task,
     get_tasks_by_user,
     get_all_tasks,
     get_task_by_id,
+    update_task,
     update_task_status,
     delete_task,
     get_tasks_for_progress,
 )
 
 STATUS_EMOJI = {"todo": "🔵", "in_progress": "🟡", "done": "✅"}
+STATUS_ORDER = {"todo": 0, "in_progress": 1, "done": 2}
 
 STATUS_CHOICES = [
     app_commands.Choice(name="To Do", value="todo"),
@@ -43,6 +46,22 @@ def _sort_pending(tasks: list[dict]) -> list[dict]:
         (t for t in tasks if t["status"] != "done"),
         key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
     )
+
+
+def _build_dm_lines(tasks: list[dict]) -> list[str]:
+    sorted_items = sorted(
+        tasks,
+        key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
+    )
+    lines = ["📋 growth-pm-bot — Your current tasks:", ""]
+    for t in sorted_items:
+        emoji = STATUS_EMOJI.get(t["status"], "🔵")
+        lines.append(
+            f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
+        )
+    lines.append("")
+    lines.append("Use /done [id] to mark a task complete.")
+    return lines
 
 
 async def _send_generic_error(interaction: discord.Interaction) -> None:
@@ -250,22 +269,16 @@ class Tasks(commands.Cog):
 
             assigner_id_int = int(task["assigner_id"])
             if assigner_id_int != interaction.user.id:
-                assigner = self.bot.get_user(assigner_id_int)
-                if assigner is None:
-                    try:
-                        assigner = await self.bot.fetch_user(assigner_id_int)
-                    except discord.HTTPException:
-                        assigner = None
-                if assigner is not None:
-                    try:
-                        await assigner.send(
-                            "✅ Task completed — growth-pm-bot\n"
-                            f"{interaction.user.display_name} completed their task:\n"
-                            f"#{task_id}: {task['task_name']}\n"
-                            f"Completed: {date.today().isoformat()}"
-                        )
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
+                try:
+                    assigner = await self.bot.fetch_user(assigner_id_int)
+                    await assigner.send(
+                        "✅ Task completed — growth-pm-bot\n"
+                        f"{interaction.user.display_name} completed their task:\n"
+                        f"#{task_id}: {task['task_name']}\n"
+                        f"Completed: {date.today().isoformat()}"
+                    )
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
@@ -310,6 +323,75 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    @app_commands.command(name="edittask", description="Edit the name or due date of a task.")
+    @app_commands.describe(
+        task_id="The task ID",
+        task_name="New task name (optional)",
+        due="New due date YYYY-MM-DD, or 'none' to remove it (optional)",
+    )
+    async def edittask(
+        self,
+        interaction: discord.Interaction,
+        task_id: int,
+        task_name: Optional[str] = None,
+        due: Optional[str] = None,
+    ):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if task_name is None and due is None:
+                await interaction.response.send_message(
+                    "❌ Please provide at least one field to update (task name or due date).",
+                    ephemeral=True,
+                )
+                return
+
+            task = get_task_by_id(task_id, interaction.guild.id)
+            if task is None:
+                await interaction.response.send_message(
+                    f"❌ Task #{task_id} not found.", ephemeral=True
+                )
+                return
+
+            is_assignee = str(interaction.user.id) == task["assignee_id"]
+            can_manage = interaction.user.guild_permissions.manage_guild
+            if not (is_assignee or can_manage):
+                await interaction.response.send_message(
+                    "❌ You can only edit your own tasks.", ephemeral=True
+                )
+                return
+
+            db_due = None
+            if due is not None:
+                if due.strip().lower() == "none":
+                    db_due = CLEAR
+                else:
+                    try:
+                        db_due = datetime.strptime(due.strip(), "%Y-%m-%d").date()
+                    except ValueError:
+                        await interaction.response.send_message(
+                            "❌ Invalid date format. Please use YYYY-MM-DD (e.g. 2026-05-20)",
+                            ephemeral=True,
+                        )
+                        return
+
+            update_task(task_id, task_name=task_name, due_date=db_due)
+            updated = get_task_by_id(task_id, interaction.guild.id)
+
+            await interaction.response.send_message(
+                f"✅ Task #{task_id} updated:\n"
+                f"📋 Name: {updated['task_name']}\n"
+                f"📅 Due: {_format_due(updated['due_date'])}",
+                ephemeral=True,
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
     @app_commands.command(name="deletetask", description="Delete a task (Manage Server only).")
     @app_commands.describe(task_id="The task ID")
     async def deletetask(self, interaction: discord.Interaction, task_id: int):
@@ -337,6 +419,69 @@ class Tasks(commands.Cog):
             await interaction.response.send_message(
                 f"🗑️ Task #{task_id} deleted.", ephemeral=True
             )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="alltasks", description="List every task in the server, grouped by member.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def alltasks(self, interaction: discord.Interaction):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            tasks = get_all_tasks(interaction.guild.id)
+            if not tasks:
+                await interaction.response.send_message(
+                    "No tasks found.", ephemeral=True
+                )
+                return
+
+            grouped: dict[str, list[dict]] = {}
+            for t in tasks:
+                grouped.setdefault(t["assignee_id"], []).append(t)
+
+            lines: list[str] = []
+            for assignee_id, items in grouped.items():
+                guild_member = interaction.guild.get_member(int(assignee_id))
+                display = guild_member.display_name if guild_member else f"User {assignee_id}"
+
+                sorted_items = sorted(
+                    items,
+                    key=lambda t: (
+                        STATUS_ORDER.get(t["status"], 99),
+                        t["due_date"] is None,
+                        t["due_date"] or date.max,
+                    ),
+                )
+
+                lines.append(f"**{display}**")
+                for t in sorted_items:
+                    emoji = STATUS_EMOJI.get(t["status"], "🔵")
+                    lines.append(
+                        f"{emoji} #{t['id']} — {t['task_name']} · "
+                        f"Assigned to: {display} · Due: {_format_due(t['due_date'])}"
+                    )
+                lines.append("")
+
+            chunks: list[str] = []
+            current = ""
+            for line in lines:
+                candidate = current + "\n" + line if current else line
+                if len(candidate) > 1900:
+                    chunks.append(current)
+                    current = line
+                else:
+                    current = candidate
+            if current:
+                chunks.append(current)
+
+            await interaction.response.send_message(chunks[0], ephemeral=True)
+            for chunk in chunks[1:]:
+                await interaction.followup.send(chunk, ephemeral=True)
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
@@ -509,14 +654,46 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="dmtasks", description="DM each team member their pending tasks.")
+    @app_commands.command(name="dmtasks", description="DM team member(s) their pending tasks.")
+    @app_commands.describe(member="Optional: DM only this member")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def dmtasks(self, interaction: discord.Interaction):
+    async def dmtasks(
+        self,
+        interaction: discord.Interaction,
+        member: Optional[discord.Member] = None,
+    ):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
                     "This command must be used in a server.", ephemeral=True
                 )
+                return
+
+            if member is not None:
+                tasks = get_tasks_by_user(interaction.guild.id, member.id)
+                pending = [t for t in tasks if t["status"] != "done"]
+
+                if not pending:
+                    await interaction.response.send_message(
+                        f"⚠️ {member.display_name} has no pending tasks.",
+                        ephemeral=True,
+                    )
+                    return
+
+                lines = _build_dm_lines(pending)
+                try:
+                    user = await self.bot.fetch_user(member.id)
+                    await user.send("\n".join(lines))
+                    await interaction.response.send_message(
+                        f"✅ DMed {member.display_name} their pending tasks.",
+                        ephemeral=True,
+                    )
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    await interaction.response.send_message(
+                        f"❌ Could not DM {member.display_name} — they may have "
+                        f"DMs disabled or have blocked the bot.",
+                        ephemeral=True,
+                    )
                 return
 
             all_tasks = get_all_tasks(interaction.guild.id)
@@ -526,36 +703,47 @@ class Tasks(commands.Cog):
             for t in pending:
                 grouped.setdefault(t["assignee_id"], []).append(t)
 
-            sent_count = 0
+            if not grouped:
+                await interaction.response.send_message(
+                    "✅ No pending tasks to deliver.", ephemeral=True
+                )
+                return
+
+            successfully_dmed: list[str] = []
+            failed_to_dm: list[str] = []
+
             for assignee_id, items in grouped.items():
                 guild_member = interaction.guild.get_member(int(assignee_id))
-                if guild_member is None:
-                    continue
-
-                sorted_items = sorted(
-                    items,
-                    key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
-                )
-
-                lines = ["📋 growth-pm-bot — Your current tasks:", ""]
-                for t in sorted_items:
-                    emoji = STATUS_EMOJI.get(t["status"], "🔵")
-                    lines.append(
-                        f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-                    )
-                lines.append("")
-                lines.append("Use /done [id] to mark a task complete.")
-
                 try:
-                    await guild_member.send("\n".join(lines))
-                    sent_count += 1
-                except (discord.Forbidden, discord.HTTPException):
+                    user = await self.bot.fetch_user(int(assignee_id))
+                    display = guild_member.display_name if guild_member else user.display_name
+                except (discord.NotFound, discord.HTTPException):
+                    display = guild_member.display_name if guild_member else f"User {assignee_id}"
+                    failed_to_dm.append(display)
                     continue
 
-            await interaction.response.send_message(
-                f"✅ DMed {sent_count} team member(s) with their pending tasks.",
-                ephemeral=True,
-            )
+                lines = _build_dm_lines(items)
+                try:
+                    await user.send("\n".join(lines))
+                    successfully_dmed.append(display)
+                except Exception:
+                    failed_to_dm.append(display)
+
+            if not successfully_dmed and failed_to_dm:
+                reply = "❌ Could not reach any members. They may have DMs disabled."
+            else:
+                n = len(successfully_dmed)
+                reply = f"✅ DMed {n} member(s) their pending tasks."
+                if successfully_dmed:
+                    reply += f"\n\n📨 Delivered: {', '.join(successfully_dmed)}"
+                if failed_to_dm:
+                    reply += (
+                        f"\n\n❌ Could not reach ({len(failed_to_dm)}): "
+                        f"{', '.join(failed_to_dm)}\n"
+                        f"(These members may have DMs disabled or have blocked the bot.)"
+                    )
+
+            await interaction.response.send_message(reply, ephemeral=True)
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)

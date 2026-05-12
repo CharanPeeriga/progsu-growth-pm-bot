@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Sentinel passed to update_task() to explicitly set due_date to NULL.
+CLEAR = object()
+
 
 def get_connection():
     database_url = os.getenv("DATABASE_URL")
@@ -98,6 +101,34 @@ def update_task_status(task_id, status):
             updated = cur.rowcount
         conn.commit()
         return updated
+    finally:
+        conn.close()
+
+
+def update_task(task_id, task_name=None, due_date=None):
+    set_clauses = []
+    params = []
+
+    if task_name is not None:
+        set_clauses.append("task_name = %s")
+        params.append(task_name)
+
+    if due_date is not None:
+        set_clauses.append("due_date = %s")
+        params.append(None if due_date is CLEAR else due_date)
+
+    if not set_clauses:
+        return
+
+    params.append(task_id)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE tasks SET {', '.join(set_clauses)} WHERE id = %s",
+                params,
+            )
+        conn.commit()
     finally:
         conn.close()
 

@@ -27,8 +27,8 @@ class Reminders(commands.Cog):
         two_day_sent = 0
         for task in two_day_tasks:
             assignee_id = int(task["assignee_id"])
-            user = self.bot.get_user(assignee_id)
-            if user is not None:
+            try:
+                user = await self.bot.fetch_user(assignee_id)
                 message = (
                     "⏰ Heads up — growth-pm-bot\n"
                     "You have a task due in 2 days:\n"
@@ -36,11 +36,10 @@ class Reminders(commands.Cog):
                     f"Due: {task['due_date'].isoformat()}\n"
                     f"Use /done {task['id']} to mark it complete."
                 )
-                try:
-                    await user.send(message)
-                    two_day_sent += 1
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    print(f"[reminders] could not DM user {assignee_id}: {e}")
+                await user.send(message)
+                two_day_sent += 1
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+                print(f"[reminders] could not DM user {assignee_id}: {e}")
 
             try:
                 mark_reminded_2day(task["id"])
@@ -50,8 +49,8 @@ class Reminders(commands.Cog):
         day_of_sent = 0
         for task in day_of_tasks:
             assignee_id = int(task["assignee_id"])
-            user = self.bot.get_user(assignee_id)
-            if user is not None:
+            try:
+                user = await self.bot.fetch_user(assignee_id)
                 message = (
                     "🚨 Due today — growth-pm-bot\n"
                     "This task is due TODAY:\n"
@@ -59,11 +58,10 @@ class Reminders(commands.Cog):
                     f"Due: {task['due_date'].isoformat()}\n"
                     f"Use /done {task['id']} to mark it complete."
                 )
-                try:
-                    await user.send(message)
-                    day_of_sent += 1
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    print(f"[reminders] could not DM user {assignee_id}: {e}")
+                await user.send(message)
+                day_of_sent += 1
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+                print(f"[reminders] could not DM user {assignee_id}: {e}")
 
             try:
                 mark_reminded_day_of(task["id"])
