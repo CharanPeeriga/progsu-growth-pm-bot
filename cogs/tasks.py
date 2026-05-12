@@ -453,7 +453,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="pingteam", description="Ping @growth with all current pending tasks.")
+    @app_commands.command(name="pingteam", description="Ping @Growth with all current pending tasks.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def pingteam(self, interaction: discord.Interaction):
         try:
@@ -463,10 +463,10 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            role = discord.utils.get(interaction.guild.roles, name="growth")
+            role = discord.utils.get(interaction.guild.roles, name="Growth")
             if role is None:
                 await interaction.response.send_message(
-                    "❌ No role named 'growth' found in this server.", ephemeral=True
+                    "❌ No role named 'Growth' found in this server.", ephemeral=True
                 )
                 return
 
@@ -560,8 +560,8 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="addmember", description="Add a member to the growth team.")
-    @app_commands.describe(member="Member to add to the growth team")
+    @app_commands.command(name="addmember", description="Add a member to the Growth team.")
+    @app_commands.describe(member="Member to add to the Growth team")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def addmember(self, interaction: discord.Interaction, member: discord.Member):
         try:
@@ -571,17 +571,17 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            role = discord.utils.get(interaction.guild.roles, name="growth")
+            role = discord.utils.get(interaction.guild.roles, name="Growth")
             if role is None:
                 role = await interaction.guild.create_role(
-                    name="growth",
+                    name="Growth",
                     mentionable=True,
-                    reason="growth-pm-bot: creating growth role",
+                    reason="growth-pm-bot: creating Growth role",
                 )
 
             if role in member.roles:
                 await interaction.response.send_message(
-                    f"⚠️ {member.display_name} is already a member of the growth team.",
+                    f"⚠️ {member.display_name} is already a member of the Growth team.",
                     ephemeral=True,
                 )
                 return
@@ -589,7 +589,7 @@ class Tasks(commands.Cog):
             await member.add_roles(role, reason="growth-pm-bot: /addmember")
 
             await interaction.response.send_message(
-                f"✅ {member.mention} has been added to the growth team!"
+                f"✅ {member.mention} has been added to the Growth team!"
             )
 
             try:

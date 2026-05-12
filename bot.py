@@ -36,8 +36,9 @@ INITIAL_EXTENSIONS = (
 async def on_ready():
     try:
         for guild in bot.guilds:
-            guild_synced = await bot.tree.sync(guild=guild)
-            print(f"Synced {len(guild_synced)} command(s) to guild '{guild.name}'.")
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print(f"Cleared guild commands for '{guild.name}'.")
 
         global_synced = await bot.tree.sync()
         print(f"Synced {len(global_synced)} slash command(s) globally.")
@@ -49,9 +50,11 @@ async def on_ready():
 @bot.command()
 @commands.is_owner()
 async def sync(ctx):
-    bot.tree.copy_global_to(guild=ctx.guild)
-    synced = await bot.tree.sync(guild=ctx.guild)
-    await ctx.send(f"✅ Synced {len(synced)} commands to this server.")
+    bot.tree.clear_commands(guild=ctx.guild)
+    await bot.tree.sync(guild=ctx.guild)
+    await ctx.send(
+        "✅ Cleared guild commands — global commands will appear within a few minutes."
+    )
 
 
 @bot.tree.error
