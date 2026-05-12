@@ -42,6 +42,13 @@ async def on_ready():
     print("✅ growth-pm-bot is online!")
 
 
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    synced = await bot.tree.sync(guild=ctx.guild)
+    await ctx.send(f"✅ Synced {len(synced)} commands to this server.")
+
+
 @bot.tree.error
 async def on_app_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
