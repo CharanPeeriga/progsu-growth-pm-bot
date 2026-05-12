@@ -16,6 +16,7 @@ from database import (
     update_task_status,
     delete_task,
     get_tasks_for_progress,
+    set_reminder_channel,
 )
 
 STATUS_EMOJI = {"todo": "🔵", "in_progress": "🟡", "done": "✅"}
@@ -64,6 +65,10 @@ def _build_dm_lines(tasks: list[dict]) -> list[str]:
     return lines
 
 
+def _is_admin(interaction: discord.Interaction) -> bool:
+    return interaction.user.guild_permissions.manage_guild
+
+
 async def _send_generic_error(interaction: discord.Interaction) -> None:
     try:
         if interaction.response.is_done():
@@ -78,6 +83,7 @@ class Tasks(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    # CHANGE 1: admin-only via inline check for custom error message
     @app_commands.command(name="assign", description="Assign a task to a member.")
     @app_commands.describe(
         member="Member to assign the task to",
@@ -95,6 +101,12 @@ class Tasks(commands.Cog):
             if interaction.guild is None:
                 await interaction.response.send_message(
                     "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "❌ Only admins can assign tasks.", ephemeral=True
                 )
                 return
 
@@ -137,6 +149,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    # CHANGE 7: public for admins
     @app_commands.command(name="mytasks", description="List your pending tasks.")
     async def mytasks(self, interaction: discord.Interaction):
         try:
@@ -148,10 +161,11 @@ class Tasks(commands.Cog):
 
             tasks = get_tasks_by_user(interaction.guild.id, interaction.user.id)
             pending = _sort_pending(tasks)
+            is_admin = _is_admin(interaction)
 
             if not pending:
                 await interaction.response.send_message(
-                    "🎉 You have no pending tasks!", ephemeral=True
+                    "🎉 You have no pending tasks!", ephemeral=not is_admin
                 )
                 return
 
@@ -162,11 +176,14 @@ class Tasks(commands.Cog):
                     f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
                 )
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            await interaction.response.send_message(
+                "\n".join(lines), ephemeral=not is_admin
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    # CHANGE 2: mentions; CHANGE 7: public for admins
     @app_commands.command(name="teamtasks", description="List pending tasks for the team or a member.")
     @app_commands.describe(member="Optional: a specific member to filter by")
     async def teamtasks(
@@ -181,24 +198,30 @@ class Tasks(commands.Cog):
                 )
                 return
 
+            is_admin = _is_admin(interaction)
+
             if member is not None:
                 tasks = get_tasks_by_user(interaction.guild.id, member.id)
                 pending = _sort_pending(tasks)
 
                 if not pending:
                     await interaction.response.send_message(
-                        "No pending tasks found.", ephemeral=True
+                        "No pending tasks found.", ephemeral=not is_admin
                     )
                     return
 
-                lines = [f"📋 Pending tasks for **{member.display_name}**:"]
+                lines = [f"📋 Pending tasks for {member.mention}:"]
                 for t in pending:
                     emoji = STATUS_EMOJI.get(t["status"], "🔵")
                     lines.append(
                         f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
                     )
 
-                await interaction.response.send_message("\n".join(lines), ephemeral=True)
+                await interaction.response.send_message(
+                    "\n".join(lines),
+                    ephemeral=not is_admin,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
                 return
 
             all_tasks = get_all_tasks(interaction.guild.id)
@@ -206,7 +229,7 @@ class Tasks(commands.Cog):
 
             if not pending:
                 await interaction.response.send_message(
-                    "No pending tasks found.", ephemeral=True
+                    "No pending tasks found.", ephemeral=not is_admin
                 )
                 return
 
@@ -216,13 +239,7 @@ class Tasks(commands.Cog):
 
             sections: list[str] = []
             for assignee_id, items in grouped.items():
-                guild_member = interaction.guild.get_member(int(assignee_id))
-                if guild_member is not None:
-                    display = guild_member.display_name
-                else:
-                    display = f"User {assignee_id}"
-
-                section = [f"**{display}**"]
+                section = [f"**<@{assignee_id}>**"]
                 for t in items:
                     emoji = STATUS_EMOJI.get(t["status"], "🔵")
                     section.append(
@@ -231,12 +248,15 @@ class Tasks(commands.Cog):
                 sections.append("\n".join(section))
 
             await interaction.response.send_message(
-                "\n\n".join(sections), ephemeral=True
+                "\n\n".join(sections),
+                ephemeral=not is_admin,
+                allowed_mentions=discord.AllowedMentions(users=False),
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    # CHANGE 2: mention in assigner DM
     @app_commands.command(name="done", description="Mark a task as complete.")
     @app_commands.describe(task_id="The task ID")
     async def done(self, interaction: discord.Interaction, task_id: int):
@@ -273,7 +293,7 @@ class Tasks(commands.Cog):
                     assigner = await self.bot.fetch_user(assigner_id_int)
                     await assigner.send(
                         "✅ Task completed — growth-pm-bot\n"
-                        f"{interaction.user.display_name} completed their task:\n"
+                        f"<@{interaction.user.id}> completed their task:\n"
                         f"#{task_id}: {task['task_name']}\n"
                         f"Completed: {date.today().isoformat()}"
                     )
@@ -423,6 +443,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    # CHANGE 2: mentions; CHANGE 7: public for admins
     @app_commands.command(name="alltasks", description="List every task in the server, grouped by member.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def alltasks(self, interaction: discord.Interaction):
@@ -440,15 +461,13 @@ class Tasks(commands.Cog):
                 )
                 return
 
+            is_admin = _is_admin(interaction)
             grouped: dict[str, list[dict]] = {}
             for t in tasks:
                 grouped.setdefault(t["assignee_id"], []).append(t)
 
             lines: list[str] = []
             for assignee_id, items in grouped.items():
-                guild_member = interaction.guild.get_member(int(assignee_id))
-                display = guild_member.display_name if guild_member else f"User {assignee_id}"
-
                 sorted_items = sorted(
                     items,
                     key=lambda t: (
@@ -458,12 +477,11 @@ class Tasks(commands.Cog):
                     ),
                 )
 
-                lines.append(f"**{display}**")
+                lines.append(f"**<@{assignee_id}>**")
                 for t in sorted_items:
                     emoji = STATUS_EMOJI.get(t["status"], "🔵")
                     lines.append(
-                        f"{emoji} #{t['id']} — {t['task_name']} · "
-                        f"Assigned to: {display} · Due: {_format_due(t['due_date'])}"
+                        f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
                     )
                 lines.append("")
 
@@ -479,13 +497,23 @@ class Tasks(commands.Cog):
             if current:
                 chunks.append(current)
 
-            await interaction.response.send_message(chunks[0], ephemeral=True)
+            ephemeral = not is_admin
+            await interaction.response.send_message(
+                chunks[0],
+                ephemeral=ephemeral,
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
             for chunk in chunks[1:]:
-                await interaction.followup.send(chunk, ephemeral=True)
+                await interaction.followup.send(
+                    chunk,
+                    ephemeral=ephemeral,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    # CHANGE 2: mentions; CHANGE 7: public for admins
     @app_commands.command(name="progress", description="Team progress snapshot for the weekly meeting.")
     @app_commands.describe(timeframe="Reporting window (defaults to This Week)")
     @app_commands.choices(timeframe=TIMEFRAME_CHOICES)
@@ -502,6 +530,7 @@ class Tasks(commands.Cog):
                 )
                 return
 
+            is_admin = _is_admin(interaction)
             window = timeframe.value if timeframe is not None else "this_week"
             if window == "this_week":
                 since_date = date.today() - timedelta(days=7)
@@ -547,12 +576,7 @@ class Tasks(commands.Cog):
 
             person_lines: list[str] = []
             for assignee_id, entry in per_person.items():
-                guild_member = interaction.guild.get_member(int(assignee_id))
-                display = guild_member.display_name if guild_member else f"User {assignee_id}"
-
-                line = (
-                    f"**{display}** — ✅ {entry['completed']} · 🔵 {entry['pending']}"
-                )
+                line = f"**<@{assignee_id}>** — ✅ {entry['completed']} · 🔵 {entry['pending']}"
                 if entry["overdue"]:
                     oldest = min(entry["overdue"], key=lambda t: t["due_date"])
                     line += (
@@ -573,10 +597,8 @@ class Tasks(commands.Cog):
             if upcoming:
                 upcoming_lines = []
                 for t in upcoming:
-                    guild_member = interaction.guild.get_member(int(t["assignee_id"]))
-                    display = guild_member.display_name if guild_member else f"User {t['assignee_id']}"
                     upcoming_lines.append(
-                        f"📅 {t['due_date'].isoformat()} — {t['task_name']} ({display})"
+                        f"📅 {t['due_date'].isoformat()} — {t['task_name']} (<@{t['assignee_id']}>)"
                     )
                 upcoming_text = "\n".join(upcoming_lines)
             else:
@@ -593,11 +615,16 @@ class Tasks(commands.Cog):
                 text=f"growth-pm-bot · Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             )
 
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(
+                embed=embed,
+                ephemeral=not is_admin,
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    # CHANGE 2: mentions instead of display names
     @app_commands.command(name="pingteam", description="Ping @Growth with all current pending tasks.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def pingteam(self, interaction: discord.Interaction):
@@ -630,10 +657,7 @@ class Tasks(commands.Cog):
 
             sections: list[str] = []
             for assignee_id, items in grouped.items():
-                guild_member = interaction.guild.get_member(int(assignee_id))
-                display = guild_member.display_name if guild_member else f"User {assignee_id}"
-
-                section = [display]
+                section = [f"<@{assignee_id}>"]
                 for t in items:
                     emoji = STATUS_EMOJI.get(t["status"], "🔵")
                     section.append(
@@ -648,12 +672,13 @@ class Tasks(commands.Cog):
 
             await interaction.response.send_message(
                 message,
-                allowed_mentions=discord.AllowedMentions(roles=[role]),
+                allowed_mentions=discord.AllowedMentions(roles=[role], users=False),
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
+    # CHANGE 2: mentions in delivery report; CHANGE 7: public for admins
     @app_commands.command(name="dmtasks", description="DM team member(s) their pending tasks.")
     @app_commands.describe(member="Optional: DM only this member")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -669,13 +694,15 @@ class Tasks(commands.Cog):
                 )
                 return
 
+            is_admin = _is_admin(interaction)
+
             if member is not None:
                 tasks = get_tasks_by_user(interaction.guild.id, member.id)
                 pending = [t for t in tasks if t["status"] != "done"]
 
                 if not pending:
                     await interaction.response.send_message(
-                        f"⚠️ {member.display_name} has no pending tasks.",
+                        f"⚠️ {member.mention} has no pending tasks.",
                         ephemeral=True,
                     )
                     return
@@ -685,12 +712,13 @@ class Tasks(commands.Cog):
                     user = await self.bot.fetch_user(member.id)
                     await user.send("\n".join(lines))
                     await interaction.response.send_message(
-                        f"✅ DMed {member.display_name} their pending tasks.",
-                        ephemeral=True,
+                        f"✅ DMed {member.mention} their pending tasks.",
+                        ephemeral=not is_admin,
+                        allowed_mentions=discord.AllowedMentions(users=False),
                     )
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     await interaction.response.send_message(
-                        f"❌ Could not DM {member.display_name} — they may have "
+                        f"❌ Could not DM {member.mention} — they may have "
                         f"DMs disabled or have blocked the bot.",
                         ephemeral=True,
                     )
@@ -713,21 +741,18 @@ class Tasks(commands.Cog):
             failed_to_dm: list[str] = []
 
             for assignee_id, items in grouped.items():
-                guild_member = interaction.guild.get_member(int(assignee_id))
                 try:
                     user = await self.bot.fetch_user(int(assignee_id))
-                    display = guild_member.display_name if guild_member else user.display_name
                 except (discord.NotFound, discord.HTTPException):
-                    display = guild_member.display_name if guild_member else f"User {assignee_id}"
-                    failed_to_dm.append(display)
+                    failed_to_dm.append(f"<@{assignee_id}>")
                     continue
 
                 lines = _build_dm_lines(items)
                 try:
                     await user.send("\n".join(lines))
-                    successfully_dmed.append(display)
+                    successfully_dmed.append(f"<@{assignee_id}>")
                 except Exception:
-                    failed_to_dm.append(display)
+                    failed_to_dm.append(f"<@{assignee_id}>")
 
             if not successfully_dmed and failed_to_dm:
                 reply = "❌ Could not reach any members. They may have DMs disabled."
@@ -743,7 +768,11 @@ class Tasks(commands.Cog):
                         f"(These members may have DMs disabled or have blocked the bot.)"
                     )
 
-            await interaction.response.send_message(reply, ephemeral=True)
+            await interaction.response.send_message(
+                reply,
+                ephemeral=not is_admin,
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
@@ -788,6 +817,162 @@ class Tasks(commands.Cog):
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    # CHANGE 3: set per-person reminder channel
+    @app_commands.command(name="setchannel", description="Set the reminder channel for a member.")
+    @app_commands.describe(
+        member="Member to configure reminders for",
+        channel="Channel to post reminders in",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def setchannel(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        channel: discord.TextChannel,
+    ):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            set_reminder_channel(interaction.guild.id, member.id, channel.id)
+            await interaction.response.send_message(
+                f"✅ Reminders for {member.mention} will be sent to {channel.mention}.",
+                ephemeral=True,
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    # CHANGE 4: manually trigger a reminder in-channel
+    @app_commands.command(name="remind", description="Remind a member of their pending tasks in this channel.")
+    @app_commands.describe(member="Member to remind")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def remind(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            tasks = get_tasks_by_user(interaction.guild.id, member.id)
+            pending = _sort_pending(tasks)
+            is_admin = _is_admin(interaction)
+
+            if not pending:
+                await interaction.response.send_message(
+                    f"⚠️ {member.mention} has no pending tasks.",
+                    ephemeral=not is_admin,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
+                return
+
+            lines = [f"📋 {member.mention} — here are your current pending tasks:", ""]
+            for t in pending:
+                emoji = STATUS_EMOJI.get(t["status"], "🔵")
+                lines.append(
+                    f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
+                )
+            lines.append("")
+            lines.append("Use /done [id] to mark a task complete.")
+            lines.append("*(This message is visible to all members in this channel.)*")
+
+            await interaction.response.send_message("\n".join(lines), ephemeral=False)
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    # CHANGE 5: list Growth team members with task counts
+    @app_commands.command(name="teammembers", description="List all Growth team members and their task counts.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def teammembers(self, interaction: discord.Interaction):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            role = discord.utils.get(interaction.guild.roles, name="Growth")
+            if role is None or not role.members:
+                await interaction.response.send_message(
+                    "No members found with the Growth role.", ephemeral=True
+                )
+                return
+
+            all_tasks = get_all_tasks(interaction.guild.id)
+
+            counts: dict[str, dict] = {}
+            for t in all_tasks:
+                entry = counts.setdefault(t["assignee_id"], {"pending": 0, "completed": 0})
+                if t["status"] == "done":
+                    entry["completed"] += 1
+                else:
+                    entry["pending"] += 1
+
+            is_admin = _is_admin(interaction)
+            lines = [f"👥 Growth Team Members ({len(role.members)} total):", ""]
+            for m in role.members:
+                entry = counts.get(str(m.id), {"pending": 0, "completed": 0})
+                lines.append(
+                    f"• {m.mention} — {entry['pending']} pending tasks, "
+                    f"{entry['completed']} completed tasks"
+                )
+
+            await interaction.response.send_message(
+                "\n".join(lines),
+                ephemeral=not is_admin,
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    # CHANGE 6: mark own task as in progress
+    @app_commands.command(name="inprogress", description="Mark a task as in progress.")
+    @app_commands.describe(task_id="The task ID")
+    async def inprogress(self, interaction: discord.Interaction, task_id: int):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            task = get_task_by_id(task_id, interaction.guild.id)
+            if task is None:
+                await interaction.response.send_message(
+                    f"❌ Task #{task_id} not found.", ephemeral=True
+                )
+                return
+
+            if str(interaction.user.id) != task["assignee_id"]:
+                await interaction.response.send_message(
+                    "❌ You can only update your own tasks.", ephemeral=True
+                )
+                return
+
+            if task["status"] == "in_progress":
+                await interaction.response.send_message(
+                    f"⚠️ Task #{task_id} is already in progress.", ephemeral=True
+                )
+                return
+
+            update_task_status(task_id, "in_progress")
+            await interaction.response.send_message(
+                f"🟡 {interaction.user.mention} is now working on task #{task_id}: {task['task_name']}"
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)

@@ -26,6 +26,13 @@ def run_migration():
                 """
                 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminded_2day BOOLEAN DEFAULT FALSE;
                 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminded_day_of BOOLEAN DEFAULT FALSE;
+                CREATE TABLE IF NOT EXISTS reminder_channels (
+                    id BIGSERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    UNIQUE(guild_id, user_id)
+                );
                 """
             )
         conn.commit()
@@ -220,6 +227,40 @@ def mark_reminded_day_of(task_id):
                 (task_id,),
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def set_reminder_channel(guild_id, user_id, channel_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reminder_channels (guild_id, user_id, channel_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (guild_id, user_id) DO UPDATE SET channel_id = EXCLUDED.channel_id
+                """,
+                (str(guild_id), str(user_id), str(channel_id)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_reminder_channel(guild_id, user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT channel_id FROM reminder_channels
+                WHERE guild_id = %s AND user_id = %s
+                """,
+                (str(guild_id), str(user_id)),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
     finally:
         conn.close()
 
