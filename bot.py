@@ -35,8 +35,12 @@ INITIAL_EXTENSIONS = (
 @bot.event
 async def on_ready():
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash command(s) globally.")
+        for guild in bot.guilds:
+            guild_synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(guild_synced)} command(s) to guild '{guild.name}'.")
+
+        global_synced = await bot.tree.sync()
+        print(f"Synced {len(global_synced)} slash command(s) globally.")
     except Exception as e:
         print(f"Failed to sync command tree: {e}")
     print("✅ growth-pm-bot is online!")
@@ -45,6 +49,7 @@ async def on_ready():
 @bot.command()
 @commands.is_owner()
 async def sync(ctx):
+    bot.tree.copy_global_to(guild=ctx.guild)
     synced = await bot.tree.sync(guild=ctx.guild)
     await ctx.send(f"✅ Synced {len(synced)} commands to this server.")
 
