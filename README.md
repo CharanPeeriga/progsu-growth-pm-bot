@@ -1,17 +1,21 @@
 # growth-pm-bot
 
-Discord PM bot for Progsu Growth. Placeholder — full docs coming soon.
+## About
 
-## Quick start
+A Discord bot for managing tasks across the progsu Growth Team. Assign tasks, track deadlines, get automatic reminders, and run weekly progress reports — all from inside Discord. Built with Python, discord.py, Supabase, and hosted on Railway.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-pip install -r requirements.txt
-cp .env.example .env            # then fill in DISCORD_TOKEN and DATABASE_URL
-python bot.py
-```
+## Command Reference
 
-## Deployment
-
-Deployed on Railway as a `worker` process (see `Procfile`).
+| Command | Description |
+| --- | --- |
+| `/assign @member "task" due:YYYY-MM-DD` | Assign a task to a team member. Due date optional. |
+| `/mytasks` | See your own pending tasks (only visible to you). |
+| `/teamtasks @member (optional)` | See all team tasks or filter by member. |
+| `/done task_id` | Mark your task as complete. Notifies the assigner. |
+| `/settaskstatus task_id status` | Update a task to todo, in_progress, or done. |
+| `/deletetask task_id` | Permanently delete a task. Admin only. |
+| `/pingteam` | Ping @growth with all current pending tasks. Admin only. |
+| `/dmtasks` | DM every member their individual pending tasks. Admin only. |
+| `/addmember @member` | Add someone to the growth team. Admin only. |
+| `/progress timeframe` | Weekly progress report. Admin only. |
+| `/ping` | Check if the bot is online. |

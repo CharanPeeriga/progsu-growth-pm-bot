@@ -1,9 +1,13 @@
 import os
 import asyncio
+import traceback
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+
+from database import run_migration
 
 load_dotenv()
 
@@ -38,7 +42,32 @@ async def on_ready():
     print("✅ growth-pm-bot is online!")
 
 
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+):
+    if isinstance(error, app_commands.MissingPermissions):
+        message = "❌ You don't have permission to use this command."
+    else:
+        message = (
+            "⚠️ Something went wrong. Please try again or contact your server admin."
+        )
+        traceback.print_exception(type(error), error, error.__traceback__)
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        traceback.print_exc()
+
+
 async def main():
+    print("Running database migration…")
+    run_migration()
+    print("Migration complete.")
+
     async with bot:
         for ext in INITIAL_EXTENSIONS:
             await bot.load_extension(ext)

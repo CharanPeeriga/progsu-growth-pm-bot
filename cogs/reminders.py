@@ -1,11 +1,11 @@
-from datetime import date, timedelta
-
 import discord
 from discord.ext import commands, tasks
 
-import database
-
-CHECK_INTERVAL_MINUTES = 60
+from database import (
+    get_unreminded_due_tasks,
+    mark_reminded_2day,
+    mark_reminded_day_of,
+)
 
 
 class Reminders(commands.Cog):
@@ -16,52 +16,61 @@ class Reminders(commands.Cog):
     def cog_unload(self):
         self.reminder_loop.cancel()
 
-    @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
+    @tasks.loop(hours=1)
     async def reminder_loop(self):
         try:
-            due_tasks = database.get_unreminded_due_tasks()
+            two_day_tasks, day_of_tasks = get_unreminded_due_tasks()
         except Exception as e:
             print(f"[reminders] failed to query due tasks: {e}")
             return
 
-        today = date.today()
-        tomorrow = today + timedelta(days=1)
-
-        for task in due_tasks:
+        two_day_sent = 0
+        for task in two_day_tasks:
             assignee_id = int(task["assignee_id"])
             user = self.bot.get_user(assignee_id)
-            if user is None:
+            if user is not None:
+                message = (
+                    "⏰ Heads up — growth-pm-bot\n"
+                    "You have a task due in 2 days:\n"
+                    f"#{task['id']}: {task['task_name']}\n"
+                    f"Due: {task['due_date'].isoformat()}\n"
+                    f"Use /done {task['id']} to mark it complete."
+                )
                 try:
-                    user = await self.bot.fetch_user(assignee_id)
-                except discord.HTTPException as e:
-                    print(f"[reminders] could not fetch user {assignee_id}: {e}")
-                    continue
-
-            due = task["due_date"]
-            if due == today:
-                when = "today"
-            elif due == tomorrow:
-                when = "tomorrow"
-            else:
-                when = due.isoformat()
-
-            message = (
-                f"⏰ Reminder: task `#{task['id']}` **{task['task_name']}** "
-                f"is due {when} ({due.isoformat()})."
-            )
+                    await user.send(message)
+                    two_day_sent += 1
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    print(f"[reminders] could not DM user {assignee_id}: {e}")
 
             try:
-                await user.send(message)
-            except discord.Forbidden:
-                print(f"[reminders] cannot DM user {assignee_id} (DMs closed)")
-            except discord.HTTPException as e:
-                print(f"[reminders] failed to DM user {assignee_id}: {e}")
-                continue
-
-            try:
-                database.mark_reminded(task["id"])
+                mark_reminded_2day(task["id"])
             except Exception as e:
-                print(f"[reminders] failed to mark task {task['id']} reminded: {e}")
+                print(f"[reminders] failed to mark task {task['id']} 2day reminded: {e}")
+
+        day_of_sent = 0
+        for task in day_of_tasks:
+            assignee_id = int(task["assignee_id"])
+            user = self.bot.get_user(assignee_id)
+            if user is not None:
+                message = (
+                    "🚨 Due today — growth-pm-bot\n"
+                    "This task is due TODAY:\n"
+                    f"#{task['id']}: {task['task_name']}\n"
+                    f"Due: {task['due_date'].isoformat()}\n"
+                    f"Use /done {task['id']} to mark it complete."
+                )
+                try:
+                    await user.send(message)
+                    day_of_sent += 1
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    print(f"[reminders] could not DM user {assignee_id}: {e}")
+
+            try:
+                mark_reminded_day_of(task["id"])
+            except Exception as e:
+                print(f"[reminders] failed to mark task {task['id']} day_of reminded: {e}")
+
+        print(f"🔔 Reminders sent — {two_day_sent} two-day, {day_of_sent} day-of")
 
     @reminder_loop.before_loop
     async def before_reminder_loop(self):

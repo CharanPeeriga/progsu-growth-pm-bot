@@ -15,6 +15,21 @@ def get_connection():
     return psycopg2.connect(database_url)
 
 
+def run_migration():
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminded_2day BOOLEAN DEFAULT FALSE;
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminded_day_of BOOLEAN DEFAULT FALSE;
+                """
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def insert_task(guild_id, assignee_id, assigner_id, task_name, due_date):
     conn = get_connection()
     try:
@@ -41,7 +56,7 @@ def get_tasks_by_user(guild_id, assignee_id):
             cur.execute(
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at, reminded
+                       due_date, status, created_at
                 FROM tasks
                 WHERE guild_id = %s AND assignee_id = %s
                 ORDER BY due_date NULLS LAST, created_at
@@ -60,7 +75,7 @@ def get_all_tasks(guild_id):
             cur.execute(
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at, reminded
+                       due_date, status, created_at
                 FROM tasks
                 WHERE guild_id = %s
                 ORDER BY due_date NULLS LAST, created_at
@@ -106,7 +121,8 @@ def get_task_by_id(task_id, guild_id):
             cur.execute(
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at, reminded
+                       due_date, status, created_at,
+                       reminded_2day, reminded_day_of
                 FROM tasks
                 WHERE id = %s AND guild_id = %s
                 """,
@@ -125,26 +141,51 @@ def get_unreminded_due_tasks():
             cur.execute(
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at, reminded
+                       due_date, status, created_at
                 FROM tasks
-                WHERE due_date IS NOT NULL
-                  AND due_date <= (CURRENT_DATE + INTERVAL '1 day')
-                  AND due_date >= CURRENT_DATE
+                WHERE due_date = CURRENT_DATE + INTERVAL '2 days'
                   AND status <> 'done'
-                  AND reminded = FALSE
+                  AND reminded_2day = FALSE
                 """
             )
-            return [dict(row) for row in cur.fetchall()]
+            two_day_tasks = [dict(row) for row in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT id, guild_id, assignee_id, assigner_id, task_name,
+                       due_date, status, created_at
+                FROM tasks
+                WHERE due_date = CURRENT_DATE
+                  AND status <> 'done'
+                  AND reminded_day_of = FALSE
+                """
+            )
+            day_of_tasks = [dict(row) for row in cur.fetchall()]
+
+        return two_day_tasks, day_of_tasks
     finally:
         conn.close()
 
 
-def mark_reminded(task_id):
+def mark_reminded_2day(task_id):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE tasks SET reminded = TRUE WHERE id = %s",
+                "UPDATE tasks SET reminded_2day = TRUE WHERE id = %s",
+                (task_id,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_reminded_day_of(task_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET reminded_day_of = TRUE WHERE id = %s",
                 (task_id,),
             )
         conn.commit()
@@ -160,7 +201,7 @@ def get_tasks_for_progress(guild_id, since_date=None):
                 cur.execute(
                     """
                     SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                           due_date, status, created_at, reminded
+                           due_date, status, created_at
                     FROM tasks
                     WHERE guild_id = %s
                     ORDER BY created_at
@@ -171,7 +212,7 @@ def get_tasks_for_progress(guild_id, since_date=None):
                 cur.execute(
                     """
                     SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                           due_date, status, created_at, reminded
+                           due_date, status, created_at
                     FROM tasks
                     WHERE guild_id = %s AND created_at >= %s
                     ORDER BY created_at
