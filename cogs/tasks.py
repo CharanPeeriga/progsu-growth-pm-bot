@@ -17,9 +17,14 @@ from database import (
     delete_task,
     get_tasks_for_progress,
     set_reminder_channel,
+    get_reminder_channel,
     get_tasks_in_review,
     approve_task,
     reject_task,
+    add_team_member,
+    remove_team_member,
+    get_team_members,
+    is_team_member,
 )
 
 STATUS_EMOJI = {"todo": "🔵", "in_progress": "🟡", "review": "⏳", "done": "✅"}
@@ -53,6 +58,15 @@ def _sort_pending(tasks: list[dict]) -> list[dict]:
     )
 
 
+def _task_line(t: dict) -> str:
+    emoji = STATUS_EMOJI.get(t["status"], "🔵")
+    label = " (In Review)" if t["status"] == "review" else ""
+    line = f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}{label}"
+    if t.get("rejection_reason"):
+        line += f"\n   ↩️ Sent back: {t['rejection_reason']}"
+    return line
+
+
 def _build_dm_lines(tasks: list[dict]) -> list[str]:
     sorted_items = sorted(
         tasks,
@@ -60,10 +74,7 @@ def _build_dm_lines(tasks: list[dict]) -> list[str]:
     )
     lines = ["📋 growth-pm-bot — Your current tasks:", ""]
     for t in sorted_items:
-        emoji = STATUS_EMOJI.get(t["status"], "🔵")
-        lines.append(
-            f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-        )
+        lines.append(_task_line(t))
     lines.append("")
     lines.append("Use /done [id] to submit a task for review.")
     return lines
@@ -174,7 +185,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="mytasks", description="List your pending tasks.")
+    @app_commands.command(name="mytasks", description="List your tasks.")
     async def mytasks(self, interaction: discord.Interaction):
         try:
             if interaction.guild is None:
@@ -184,22 +195,52 @@ class Tasks(commands.Cog):
                 return
 
             tasks = get_tasks_by_user(interaction.guild.id, interaction.user.id)
-            pending = _sort_pending(tasks)
-
-            if not pending:
+            if not tasks:
                 await interaction.response.send_message(
-                    "🎉 You have no pending tasks!", ephemeral=True
+                    "🎉 You have no tasks!", ephemeral=True
                 )
                 return
 
-            lines = ["📋 Your Pending Tasks:"]
-            for t in pending:
-                emoji = STATUS_EMOJI.get(t["status"], "🔵")
-                lines.append(
-                    f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-                )
+            pending = sorted(
+                [t for t in tasks if t["status"] in ("todo", "in_progress")],
+                key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
+            )
+            in_review = [t for t in tasks if t["status"] == "review"]
+            done_tasks = sorted(
+                [t for t in tasks if t["status"] == "done"],
+                key=lambda t: t["id"],
+                reverse=True,
+            )[:5]
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            lines: list[str] = []
+
+            if pending:
+                lines.append("📋 Your Pending Tasks:")
+                for t in pending:
+                    lines.append(_task_line(t))
+                lines.append("")
+
+            if in_review:
+                lines.append("⏳ Awaiting Review:")
+                for t in in_review:
+                    lines.append(_task_line(t))
+                lines.append("")
+
+            if done_tasks:
+                lines.append("✅ Recently Completed:")
+                for t in done_tasks:
+                    lines.append(_task_line(t))
+                lines.append("")
+
+            if not lines:
+                await interaction.response.send_message(
+                    "🎉 You have no tasks!", ephemeral=True
+                )
+                return
+
+            await interaction.response.send_message(
+                "\n".join(lines).strip(), ephemeral=True
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
@@ -230,10 +271,7 @@ class Tasks(commands.Cog):
 
                 lines = [f"📋 Pending tasks for {member.mention}:"]
                 for t in pending:
-                    emoji = STATUS_EMOJI.get(t["status"], "🔵")
-                    lines.append(
-                        f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-                    )
+                    lines.append(_task_line(t))
 
                 await interaction.response.send_message(
                     "\n".join(lines),
@@ -259,10 +297,7 @@ class Tasks(commands.Cog):
             for assignee_id, items in grouped.items():
                 section = [f"**<@{assignee_id}>**"]
                 for t in items:
-                    emoji = STATUS_EMOJI.get(t["status"], "🔵")
-                    section.append(
-                        f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-                    )
+                    section.append(_task_line(t))
                 sections.append("\n".join(section))
 
             await interaction.response.send_message(
@@ -674,10 +709,7 @@ class Tasks(commands.Cog):
 
                 lines.append(f"**<@{assignee_id}>**")
                 for t in sorted_items:
-                    emoji = STATUS_EMOJI.get(t["status"], "🔵")
-                    lines.append(
-                        f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-                    )
+                    lines.append(_task_line(t))
                 lines.append("")
 
             chunks: list[str] = []
@@ -840,13 +872,6 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            role = discord.utils.get(interaction.guild.roles, name="Growth")
-            if role is None:
-                await interaction.response.send_message(
-                    "❌ No role named 'Growth' found in this server.", ephemeral=True
-                )
-                return
-
             all_tasks = get_all_tasks(interaction.guild.id)
             pending = _sort_pending(all_tasks)
 
@@ -856,33 +881,51 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            grouped: dict[str, list[dict]] = {}
+            team_rows = get_team_members(interaction.guild.id)
+            team_ids = {row["user_id"] for row in team_rows}
+
+            team_tasks: dict[str, list[dict]] = {}
+            other_tasks: dict[str, list[dict]] = {}
             for t in pending:
-                grouped.setdefault(t["assignee_id"], []).append(t)
+                if t["assignee_id"] in team_ids:
+                    team_tasks.setdefault(t["assignee_id"], []).append(t)
+                else:
+                    other_tasks.setdefault(t["assignee_id"], []).append(t)
+
+            role = discord.utils.get(interaction.guild.roles, name="Growth")
+            ping_prefix = f"{role.mention} — " if role else ""
 
             sections: list[str] = []
-            for assignee_id, items in grouped.items():
+            for assignee_id, items in team_tasks.items():
                 section = [f"<@{assignee_id}>"]
                 for t in items:
-                    emoji = STATUS_EMOJI.get(t["status"], "🔵")
-                    section.append(
-                        f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-                    )
+                    section.append(_task_line(t))
                 sections.append("\n".join(section))
 
-            body = "\n\n".join(sections)
-            message = f"{role.mention} — here are all current pending tasks:\n\n{body}"
+            body = "\n\n".join(sections) if sections else "No pending tasks for team members."
+            message = f"{ping_prefix}here are all current pending tasks:\n\n{body}"
+
+            if other_tasks:
+                other_sections: list[str] = []
+                for assignee_id, items in other_tasks.items():
+                    section = [f"<@{assignee_id}>"]
+                    for t in items:
+                        section.append(_task_line(t))
+                    other_sections.append("\n".join(section))
+                message += (
+                    "\n\n📋 Other assigned tasks (not on official team roster):\n"
+                    + "\n\n".join(other_sections)
+                )
+
             if len(message) > 1900:
                 message = message[:1900] + "\n…(truncated)"
 
-            await interaction.response.send_message(
-                message,
-                allowed_mentions=discord.AllowedMentions(roles=[role], users=False),
-            )
+            allowed = discord.AllowedMentions(roles=[role] if role else [], users=False)
+            await interaction.response.send_message(message, allowed_mentions=allowed)
 
             await self.notify_admin(
                 interaction, "pingteam",
-                f"Pinged @Growth with {len(pending)} pending task(s)",
+                f"Pinged team with {len(pending)} pending task(s)",
             )
         except Exception:
             traceback.print_exc()
@@ -935,30 +978,33 @@ class Tasks(commands.Cog):
                     )
                 return
 
-            all_tasks = get_all_tasks(interaction.guild.id)
-            pending = [t for t in all_tasks if t["status"] not in ("done",)]
-
-            grouped: dict[str, list[dict]] = {}
-            for t in pending:
-                grouped.setdefault(t["assignee_id"], []).append(t)
-
-            if not grouped:
+            # No-member mode: only DM registered team members
+            team_rows = get_team_members(interaction.guild.id)
+            if not team_rows:
                 await interaction.response.send_message(
-                    "✅ No pending tasks to deliver.", ephemeral=True
+                    "⚠️ No team members found. Use /addmember to add members first.",
+                    ephemeral=True,
                 )
                 return
 
             successfully_dmed: list[str] = []
             failed_to_dm: list[str] = []
 
-            for assignee_id, items in grouped.items():
+            for row in team_rows:
+                assignee_id = row["user_id"]
+                tasks = get_tasks_by_user(interaction.guild.id, assignee_id)
+                pending = [t for t in tasks if t["status"] not in ("done",)]
+
+                if not pending:
+                    continue
+
                 try:
                     user = await self.bot.fetch_user(int(assignee_id))
                 except (discord.NotFound, discord.HTTPException):
                     failed_to_dm.append(f"<@{assignee_id}>")
                     continue
 
-                lines = _build_dm_lines(items)
+                lines = _build_dm_lines(pending)
                 try:
                     await user.send("\n".join(lines))
                     successfully_dmed.append(f"<@{assignee_id}>")
@@ -967,11 +1013,12 @@ class Tasks(commands.Cog):
 
             if not successfully_dmed and failed_to_dm:
                 reply = "❌ Could not reach any members. They may have DMs disabled."
+            elif not successfully_dmed:
+                reply = "✅ No team members have pending tasks."
             else:
                 n = len(successfully_dmed)
-                reply = f"✅ DMed {n} member(s) their pending tasks."
-                if successfully_dmed:
-                    reply += f"\n\n📨 Delivered: {', '.join(successfully_dmed)}"
+                reply = f"✅ DMed {n} team member(s) their pending tasks."
+                reply += f"\n\n📨 Delivered: {', '.join(successfully_dmed)}"
                 if failed_to_dm:
                     reply += (
                         f"\n\n❌ Could not reach ({len(failed_to_dm)}): "
@@ -987,7 +1034,7 @@ class Tasks(commands.Cog):
 
             await self.notify_admin(
                 interaction, "dmtasks",
-                f"DMed {len(successfully_dmed)} member(s) their tasks "
+                f"DMed {len(successfully_dmed)} team member(s) their tasks "
                 f"({len(failed_to_dm)} failed)",
             )
         except Exception:
@@ -1005,25 +1052,17 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            role = discord.utils.get(interaction.guild.roles, name="Growth")
-            if role is None:
-                role = await interaction.guild.create_role(
-                    name="Growth",
-                    mentionable=True,
-                    reason="growth-pm-bot: creating Growth role",
-                )
-
-            if role in member.roles:
+            if is_team_member(interaction.guild.id, member.id):
                 await interaction.response.send_message(
-                    f"⚠️ {member.display_name} is already a member of the Growth team.",
+                    f"⚠️ {member.mention} is already on the team.",
                     ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions(users=False),
                 )
                 return
 
-            await member.add_roles(role, reason="growth-pm-bot: /addmember")
-
+            add_team_member(interaction.guild.id, member.id, member.display_name)
             await interaction.response.send_message(
-                f"✅ {member.mention} has been added to the Growth team!"
+                f"✅ {member.mention} has been added to the growth team!"
             )
 
             try:
@@ -1038,6 +1077,38 @@ class Tasks(commands.Cog):
             await self.notify_admin(
                 interaction, "addmember",
                 f"Added {member.mention} to the Growth team",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="removemember", description="Remove a member from the Growth team.")
+    @app_commands.describe(member="Member to remove from the Growth team")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def removemember(self, interaction: discord.Interaction, member: discord.Member):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not is_team_member(interaction.guild.id, member.id):
+                await interaction.response.send_message(
+                    f"⚠️ {member.mention} is not on the team.",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
+                return
+
+            remove_team_member(interaction.guild.id, member.id)
+            await interaction.response.send_message(
+                f"✅ {member.mention} has been removed from the growth team."
+            )
+
+            await self.notify_admin(
+                interaction, "removemember",
+                f"Removed {member.mention} from the Growth team",
             )
         except Exception:
             traceback.print_exc()
@@ -1076,7 +1147,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="remind", description="Remind a member of their pending tasks in this channel.")
+    @app_commands.command(name="remind", description="Remind a member of their pending tasks.")
     @app_commands.describe(member="Member to remind")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def remind(
@@ -1092,9 +1163,12 @@ class Tasks(commands.Cog):
                 return
 
             tasks = get_tasks_by_user(interaction.guild.id, member.id)
-            pending = _sort_pending(tasks)
+            active_tasks = sorted(
+                [t for t in tasks if t["status"] != "done"],
+                key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
+            )
 
-            if not pending:
+            if not active_tasks:
                 await interaction.response.send_message(
                     f"⚠️ {member.mention} has no pending tasks.",
                     ephemeral=True,
@@ -1103,20 +1177,43 @@ class Tasks(commands.Cog):
                 return
 
             lines = [f"📋 {member.mention} — here are your current pending tasks:", ""]
-            for t in pending:
-                emoji = STATUS_EMOJI.get(t["status"], "🔵")
-                lines.append(
-                    f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
-                )
+            for t in active_tasks:
+                lines.append(_task_line(t))
             lines.append("")
             lines.append("Use /done [id] to submit a task for review.")
-            lines.append("*(This message is visible to all members in this channel.)*")
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=False)
+            channel_id = get_reminder_channel(interaction.guild.id, str(member.id))
+            if channel_id is not None:
+                try:
+                    channel = await self.bot.fetch_channel(int(channel_id))
+                    await channel.send(
+                        "\n".join(lines),
+                        allowed_mentions=discord.AllowedMentions(users=True),
+                    )
+                    await interaction.response.send_message(
+                        f"✅ Posted reminder for {member.mention} in {channel.mention}.",
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions(users=False),
+                    )
+                except Exception:
+                    await interaction.response.send_message(
+                        "❌ Could not post in the configured reminder channel.",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                lines.append(
+                    "\n*(No reminder channel set — use /setchannel to assign one)*"
+                )
+                await interaction.response.send_message(
+                    "\n".join(lines),
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
 
             await self.notify_admin(
                 interaction, "remind",
-                f"Sent task reminder to {member.mention} ({len(pending)} pending task(s))",
+                f"Sent task reminder to {member.mention} ({len(active_tasks)} active task(s))",
             )
         except Exception:
             traceback.print_exc()
@@ -1132,30 +1229,51 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            role = discord.utils.get(interaction.guild.roles, name="Growth")
-            if role is None or not role.members:
+            team_rows = get_team_members(interaction.guild.id)
+            if not team_rows:
                 await interaction.response.send_message(
-                    "No members found with the Growth role.", ephemeral=True
+                    "No team members found. Use /addmember to add members.", ephemeral=True
                 )
                 return
 
             all_tasks = get_all_tasks(interaction.guild.id)
+            today = date.today()
 
             counts: dict[str, dict] = {}
             for t in all_tasks:
-                entry = counts.setdefault(t["assignee_id"], {"pending": 0, "completed": 0})
+                entry = counts.setdefault(
+                    t["assignee_id"],
+                    {"pending": 0, "completed": 0, "overdue": 0},
+                )
                 if t["status"] == "done":
                     entry["completed"] += 1
                 else:
                     entry["pending"] += 1
+                    if (
+                        t["due_date"] is not None
+                        and t["due_date"] < today
+                        and t["status"] not in ("done", "review")
+                    ):
+                        entry["overdue"] += 1
 
-            lines = [f"👥 Growth Team Members ({len(role.members)} total):", ""]
-            for m in role.members:
-                entry = counts.get(str(m.id), {"pending": 0, "completed": 0})
-                lines.append(
-                    f"• {m.mention} — {entry['pending']} pending tasks, "
-                    f"{entry['completed']} completed tasks"
+            lines = [f"👥 Growth Team Members ({len(team_rows)} total):", ""]
+            for row in team_rows:
+                uid = row["user_id"]
+                try:
+                    user = await self.bot.fetch_user(int(uid))
+                    display = user.display_name
+                except Exception:
+                    display = row.get("display_name") or f"<@{uid}>"
+
+                entry = counts.get(uid, {"pending": 0, "completed": 0, "overdue": 0})
+                line = (
+                    f"• <@{uid}> ({display}) — "
+                    f"{entry['pending']} pending, "
+                    f"{entry['completed']} completed"
                 )
+                if entry["overdue"]:
+                    line += f", ⚠️ {entry['overdue']} overdue"
+                lines.append(line)
 
             await interaction.response.send_message(
                 "\n".join(lines),

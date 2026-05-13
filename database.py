@@ -37,6 +37,14 @@ def run_migration():
                     channel_id TEXT NOT NULL,
                     UNIQUE(guild_id, user_id)
                 );
+                CREATE TABLE IF NOT EXISTS team_members (
+                    id BIGSERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    display_name TEXT,
+                    added_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(guild_id, user_id)
+                );
                 """
             )
         conn.commit()
@@ -70,7 +78,7 @@ def get_tasks_by_user(guild_id, assignee_id):
             cur.execute(
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at
+                       due_date, status, created_at, rejection_reason
                 FROM tasks
                 WHERE guild_id = %s AND assignee_id = %s
                 ORDER BY due_date NULLS LAST, created_at
@@ -89,7 +97,7 @@ def get_all_tasks(guild_id):
             cur.execute(
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at
+                       due_date, status, created_at, rejection_reason
                 FROM tasks
                 WHERE guild_id = %s
                 ORDER BY due_date NULLS LAST, created_at
@@ -164,7 +172,7 @@ def get_task_by_id(task_id, guild_id):
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
                        due_date, status, created_at,
-                       reminded_2day, reminded_day_of
+                       reminded_2day, reminded_day_of, rejection_reason
                 FROM tasks
                 WHERE id = %s AND guild_id = %s
                 """,
@@ -242,7 +250,7 @@ def get_tasks_in_review(guild_id):
             cur.execute(
                 """
                 SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at
+                       due_date, status, created_at, rejection_reason
                 FROM tasks
                 WHERE guild_id = %s AND status = 'review'
                 ORDER BY created_at
@@ -341,5 +349,66 @@ def get_tasks_for_progress(guild_id, since_date=None):
                     (str(guild_id), since_date),
                 )
             return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def add_team_member(guild_id, user_id, display_name):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO team_members (guild_id, user_id, display_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (guild_id, user_id) DO NOTHING
+                """,
+                (str(guild_id), str(user_id), display_name),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def remove_team_member(guild_id, user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM team_members WHERE guild_id = %s AND user_id = %s",
+                (str(guild_id), str(user_id)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_team_members(guild_id):
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, guild_id, user_id, display_name, added_at
+                FROM team_members
+                WHERE guild_id = %s
+                ORDER BY added_at
+                """,
+                (str(guild_id),),
+            )
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def is_team_member(guild_id, user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM team_members WHERE guild_id = %s AND user_id = %s",
+                (str(guild_id), str(user_id)),
+            )
+            return cur.fetchone() is not None
     finally:
         conn.close()

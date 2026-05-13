@@ -21,6 +21,10 @@ A Discord bot for managing tasks across the progsu Growth Team. Assign tasks, tr
 | `/alltasks` | List every task across all statuses, sorted by status then due date. Admin only. |
 | `/pingteam` | Ping @Growth with all current pending tasks. Admin only. |
 | `/dmtasks @member (optional)` | DM a member (or all members) their individual pending tasks. Admin only. |
-| `/addmember @member` | Add someone to the Growth team. Admin only. |
+| `/addmember @member` | Add someone to the Growth team roster. Admin only. |
+| `/removemember @member` | Remove someone from the Growth team roster. Admin only. |
+| `/teammembers` | List all team members with pending, completed, and overdue counts. Admin only. |
+| `/setchannel @member #channel` | Set the channel where reminders are posted for a member. Admin only. |
+| `/remind @member` | Post a member's pending tasks in their reminder channel (or ephemerally). Admin only. |
 | `/progress timeframe` | Weekly progress report. Admin only. |
 | `/ping` | Check if the bot is online. |
