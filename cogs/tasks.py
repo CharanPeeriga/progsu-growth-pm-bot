@@ -17,14 +17,18 @@ from database import (
     delete_task,
     get_tasks_for_progress,
     set_reminder_channel,
+    get_tasks_in_review,
+    approve_task,
+    reject_task,
 )
 
-STATUS_EMOJI = {"todo": "🔵", "in_progress": "🟡", "done": "✅"}
-STATUS_ORDER = {"todo": 0, "in_progress": 1, "done": 2}
+STATUS_EMOJI = {"todo": "🔵", "in_progress": "🟡", "review": "⏳", "done": "✅"}
+STATUS_ORDER = {"todo": 0, "in_progress": 1, "review": 2, "done": 3}
 
 STATUS_CHOICES = [
     app_commands.Choice(name="To Do", value="todo"),
     app_commands.Choice(name="In Progress", value="in_progress"),
+    app_commands.Choice(name="In Review", value="review"),
     app_commands.Choice(name="Done", value="done"),
 ]
 
@@ -61,12 +65,8 @@ def _build_dm_lines(tasks: list[dict]) -> list[str]:
             f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
         )
     lines.append("")
-    lines.append("Use /done [id] to mark a task complete.")
+    lines.append("Use /done [id] to submit a task for review.")
     return lines
-
-
-def _is_admin(interaction: discord.Interaction) -> bool:
-    return interaction.user.guild_permissions.manage_guild
 
 
 async def _send_generic_error(interaction: discord.Interaction) -> None:
@@ -83,7 +83,27 @@ class Tasks(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # CHANGE 1: admin-only via inline check for custom error message
+    async def notify_admin(
+        self,
+        interaction: discord.Interaction,
+        command_name: str,
+        details: str,
+    ) -> None:
+        if interaction.guild is None:
+            return
+        try:
+            owner = await self.bot.fetch_user(interaction.guild.owner_id)
+            await owner.send(
+                f"📋 Command used — growth-pm-bot\n"
+                f"Command: /{command_name}\n"
+                f"Used by: {interaction.user.mention} ({interaction.user.name})\n"
+                f"Server: {interaction.guild.name}\n"
+                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+                f"Details: {details}"
+            )
+        except Exception:
+            pass
+
     @app_commands.command(name="assign", description="Assign a task to a member.")
     @app_commands.describe(
         member="Member to assign the task to",
@@ -141,15 +161,19 @@ class Tasks(commands.Cog):
                     f"📋 New task assigned by {interaction.user.display_name}\n"
                     f"Task #{task_id}: {task}\n"
                     f"Due: {due_str}\n"
-                    f"Use /done {task_id} when complete."
+                    f"Use /done {task_id} to submit for review when complete."
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass
+
+            await self.notify_admin(
+                interaction, "assign",
+                f"Assigned task #{task_id} '{task}' to {member.mention}",
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 7: public for admins
     @app_commands.command(name="mytasks", description="List your pending tasks.")
     async def mytasks(self, interaction: discord.Interaction):
         try:
@@ -161,11 +185,10 @@ class Tasks(commands.Cog):
 
             tasks = get_tasks_by_user(interaction.guild.id, interaction.user.id)
             pending = _sort_pending(tasks)
-            is_admin = _is_admin(interaction)
 
             if not pending:
                 await interaction.response.send_message(
-                    "🎉 You have no pending tasks!", ephemeral=not is_admin
+                    "🎉 You have no pending tasks!", ephemeral=True
                 )
                 return
 
@@ -176,14 +199,11 @@ class Tasks(commands.Cog):
                     f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
                 )
 
-            await interaction.response.send_message(
-                "\n".join(lines), ephemeral=not is_admin
-            )
+            await interaction.response.send_message("\n".join(lines), ephemeral=True)
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 2: mentions; CHANGE 7: public for admins
     @app_commands.command(name="teamtasks", description="List pending tasks for the team or a member.")
     @app_commands.describe(member="Optional: a specific member to filter by")
     async def teamtasks(
@@ -198,15 +218,13 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            is_admin = _is_admin(interaction)
-
             if member is not None:
                 tasks = get_tasks_by_user(interaction.guild.id, member.id)
                 pending = _sort_pending(tasks)
 
                 if not pending:
                     await interaction.response.send_message(
-                        "No pending tasks found.", ephemeral=not is_admin
+                        "No pending tasks found.", ephemeral=True
                     )
                     return
 
@@ -219,7 +237,7 @@ class Tasks(commands.Cog):
 
                 await interaction.response.send_message(
                     "\n".join(lines),
-                    ephemeral=not is_admin,
+                    ephemeral=True,
                     allowed_mentions=discord.AllowedMentions(users=False),
                 )
                 return
@@ -229,7 +247,7 @@ class Tasks(commands.Cog):
 
             if not pending:
                 await interaction.response.send_message(
-                    "No pending tasks found.", ephemeral=not is_admin
+                    "No pending tasks found.", ephemeral=True
                 )
                 return
 
@@ -249,15 +267,14 @@ class Tasks(commands.Cog):
 
             await interaction.response.send_message(
                 "\n\n".join(sections),
-                ephemeral=not is_admin,
+                ephemeral=True,
                 allowed_mentions=discord.AllowedMentions(users=False),
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 2: mention in assigner DM
-    @app_commands.command(name="done", description="Mark a task as complete.")
+    @app_commands.command(name="done", description="Submit a task for admin review.")
     @app_commands.describe(task_id="The task ID")
     async def done(self, interaction: discord.Interaction, task_id: int):
         try:
@@ -274,31 +291,190 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            is_assignee = str(interaction.user.id) == task["assignee_id"]
-            can_manage = interaction.user.guild_permissions.manage_guild
-            if not (is_assignee or can_manage):
+            if task["status"] == "review":
                 await interaction.response.send_message(
-                    "❌ You can only mark your own tasks as complete.", ephemeral=True
+                    f"⏳ Task #{task_id} is already submitted for review.", ephemeral=True
                 )
                 return
 
-            update_task_status(task_id, "done")
+            if task["status"] == "done":
+                await interaction.response.send_message(
+                    f"✅ Task #{task_id} is already complete.", ephemeral=True
+                )
+                return
+
+            if str(interaction.user.id) != task["assignee_id"]:
+                await interaction.response.send_message(
+                    "❌ You can only submit your own tasks.", ephemeral=True
+                )
+                return
+
+            update_task_status(task_id, "review")
             await interaction.response.send_message(
-                f"✅ {interaction.user.mention} completed task #{task_id}: ~~{task['task_name']}~~"
+                f"⏳ {interaction.user.mention} submitted task #{task_id} for review:\n"
+                f"📋 {task['task_name']}\n"
+                f"Waiting for admin approval."
             )
 
-            assigner_id_int = int(task["assigner_id"])
-            if assigner_id_int != interaction.user.id:
-                try:
-                    assigner = await self.bot.fetch_user(assigner_id_int)
-                    await assigner.send(
-                        "✅ Task completed — growth-pm-bot\n"
-                        f"<@{interaction.user.id}> completed their task:\n"
-                        f"#{task_id}: {task['task_name']}\n"
-                        f"Completed: {date.today().isoformat()}"
-                    )
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    pass
+            try:
+                owner = await self.bot.fetch_user(interaction.guild.owner_id)
+                await owner.send(
+                    f"📋 Task submitted for review — growth-pm-bot\n"
+                    f"{interaction.user.mention} completed their task and submitted it for review:\n"
+                    f"Task #{task_id}: {task['task_name']}\n"
+                    f"Use /approve {task_id} to mark it done or "
+                    f"/reject {task_id} [reason] to send it back."
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+            await self.notify_admin(
+                interaction, "done",
+                f"{interaction.user.mention} submitted task #{task_id} for review: {task['task_name']}",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="approve", description="Approve a reviewed task and mark it complete.")
+    @app_commands.describe(task_id="The task ID")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def approve(self, interaction: discord.Interaction, task_id: int):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            task = get_task_by_id(task_id, interaction.guild.id)
+            if task is None:
+                await interaction.response.send_message(
+                    f"❌ Task #{task_id} not found.", ephemeral=True
+                )
+                return
+
+            if task["status"] != "review":
+                await interaction.response.send_message(
+                    f"⚠️ Task #{task_id} is not in review. Current status: {task['status']}",
+                    ephemeral=True,
+                )
+                return
+
+            approve_task(task_id)
+            await interaction.response.send_message(
+                f"✅ Task #{task_id} approved and marked complete:\n"
+                f"📋 {task['task_name']}\n"
+                f"Great work <@{task['assignee_id']}>!"
+            )
+
+            try:
+                assignee = await self.bot.fetch_user(int(task["assignee_id"]))
+                await assignee.send(
+                    f"✅ Task approved — growth-pm-bot\n"
+                    f"Your task has been reviewed and approved!\n"
+                    f"Task #{task_id}: {task['task_name']}\n"
+                    f"Great work!"
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+            await self.notify_admin(
+                interaction, "approve",
+                f"Approved task #{task_id}: {task['task_name']} "
+                f"(assigned to <@{task['assignee_id']}>)",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="reject", description="Send a task back to the assignee with feedback.")
+    @app_commands.describe(task_id="The task ID", reason="Feedback for the member")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def reject(
+        self,
+        interaction: discord.Interaction,
+        task_id: int,
+        reason: str,
+    ):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            task = get_task_by_id(task_id, interaction.guild.id)
+            if task is None:
+                await interaction.response.send_message(
+                    f"❌ Task #{task_id} not found.", ephemeral=True
+                )
+                return
+
+            if task["status"] != "review":
+                await interaction.response.send_message(
+                    f"⚠️ Task #{task_id} is not in review. Current status: {task['status']}",
+                    ephemeral=True,
+                )
+                return
+
+            reject_task(task_id, reason)
+            await interaction.response.send_message(
+                f"↩️ Task #{task_id} sent back to <@{task['assignee_id']}>:\n"
+                f"📋 {task['task_name']}\n"
+                f"Reason: {reason}"
+            )
+
+            try:
+                assignee = await self.bot.fetch_user(int(task["assignee_id"]))
+                await assignee.send(
+                    f"↩️ Task sent back — growth-pm-bot\n"
+                    f"Your task has been reviewed and needs more work:\n"
+                    f"Task #{task_id}: {task['task_name']}\n"
+                    f"Feedback: {reason}\n"
+                    f"Update your work and resubmit with /done {task_id} when ready."
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+            await self.notify_admin(
+                interaction, "reject",
+                f"Rejected task #{task_id}: {task['task_name']} — Reason: {reason}",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="reviewqueue", description="See all tasks waiting for admin review.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def reviewqueue(self, interaction: discord.Interaction):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            tasks = get_tasks_in_review(interaction.guild.id)
+            if not tasks:
+                await interaction.response.send_message(
+                    "✅ No tasks waiting for review.", ephemeral=True
+                )
+                return
+
+            lines = ["⏳ Tasks Awaiting Review:", ""]
+            for t in tasks:
+                lines.append(f"**#{t['id']} — {t['task_name']}**")
+                lines.append(f"👤 Submitted by: <@{t['assignee_id']}>")
+                lines.append(f"📅 Due: {_format_due(t['due_date'])}")
+                lines.append(f"Use /approve {t['id']} or /reject {t['id']} [reason]")
+                lines.append("")
+
+            await interaction.response.send_message(
+                "\n".join(lines),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
@@ -338,6 +514,11 @@ class Tasks(commands.Cog):
             emoji = STATUS_EMOJI.get(status.value, "")
             await interaction.response.send_message(
                 f"Updated task #{task_id} to {emoji} {status.value}", ephemeral=True
+            )
+
+            await self.notify_admin(
+                interaction, "settaskstatus",
+                f"Updated task #{task_id} status to {status.value}: {task['task_name']}",
             )
         except Exception:
             traceback.print_exc()
@@ -386,18 +567,24 @@ class Tasks(commands.Cog):
                 return
 
             db_due = None
+            changes: list[str] = []
             if due is not None:
                 if due.strip().lower() == "none":
                     db_due = CLEAR
+                    changes.append("due date cleared")
                 else:
                     try:
                         db_due = datetime.strptime(due.strip(), "%Y-%m-%d").date()
+                        changes.append(f"due → {db_due.isoformat()}")
                     except ValueError:
                         await interaction.response.send_message(
                             "❌ Invalid date format. Please use YYYY-MM-DD (e.g. 2026-05-20)",
                             ephemeral=True,
                         )
                         return
+
+            if task_name is not None:
+                changes.append(f"name → '{task_name}'")
 
             update_task(task_id, task_name=task_name, due_date=db_due)
             updated = get_task_by_id(task_id, interaction.guild.id)
@@ -407,6 +594,11 @@ class Tasks(commands.Cog):
                 f"📋 Name: {updated['task_name']}\n"
                 f"📅 Due: {_format_due(updated['due_date'])}",
                 ephemeral=True,
+            )
+
+            await self.notify_admin(
+                interaction, "edittask",
+                f"Edited task #{task_id}: {', '.join(changes)}",
             )
         except Exception:
             traceback.print_exc()
@@ -439,11 +631,15 @@ class Tasks(commands.Cog):
             await interaction.response.send_message(
                 f"🗑️ Task #{task_id} deleted.", ephemeral=True
             )
+
+            await self.notify_admin(
+                interaction, "deletetask",
+                f"Deleted task #{task_id}: {task['task_name']}",
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 2: mentions; CHANGE 7: public for admins
     @app_commands.command(name="alltasks", description="List every task in the server, grouped by member.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def alltasks(self, interaction: discord.Interaction):
@@ -461,7 +657,6 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            is_admin = _is_admin(interaction)
             grouped: dict[str, list[dict]] = {}
             for t in tasks:
                 grouped.setdefault(t["assignee_id"], []).append(t)
@@ -497,23 +692,21 @@ class Tasks(commands.Cog):
             if current:
                 chunks.append(current)
 
-            ephemeral = not is_admin
             await interaction.response.send_message(
                 chunks[0],
-                ephemeral=ephemeral,
+                ephemeral=True,
                 allowed_mentions=discord.AllowedMentions(users=False),
             )
             for chunk in chunks[1:]:
                 await interaction.followup.send(
                     chunk,
-                    ephemeral=ephemeral,
+                    ephemeral=True,
                     allowed_mentions=discord.AllowedMentions(users=False),
                 )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 2: mentions; CHANGE 7: public for admins
     @app_commands.command(name="progress", description="Team progress snapshot for the weekly meeting.")
     @app_commands.describe(timeframe="Reporting window (defaults to This Week)")
     @app_commands.choices(timeframe=TIMEFRAME_CHOICES)
@@ -530,7 +723,6 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            is_admin = _is_admin(interaction)
             window = timeframe.value if timeframe is not None else "this_week"
             if window == "this_week":
                 since_date = date.today() - timedelta(days=7)
@@ -544,10 +736,13 @@ class Tasks(commands.Cog):
 
             total = len(tasks)
             completed = sum(1 for t in tasks if t["status"] == "done")
+            in_review = sum(1 for t in tasks if t["status"] == "review")
             pending = sum(1 for t in tasks if t["status"] in ("todo", "in_progress"))
             overdue_tasks = [
                 t for t in tasks
-                if t["due_date"] is not None and t["due_date"] < today and t["status"] != "done"
+                if t["due_date"] is not None
+                and t["due_date"] < today
+                and t["status"] not in ("done", "review")
             ]
             overdue = len(overdue_tasks)
             completion_rate = round((completed / total * 100), 1) if total else 0.0
@@ -556,6 +751,7 @@ class Tasks(commands.Cog):
                 f"**Window:** {window_label}\n"
                 f"Total tasks: **{total}**\n"
                 f"✅ Completed: **{completed}**\n"
+                f"⏳ In Review: **{in_review}**\n"
                 f"🔵 Pending: **{pending}**\n"
                 f"⚠️ Overdue: **{overdue}**\n"
                 f"📈 Completion rate: **{completion_rate}%**"
@@ -565,10 +761,12 @@ class Tasks(commands.Cog):
             for t in tasks:
                 entry = per_person.setdefault(
                     t["assignee_id"],
-                    {"completed": 0, "pending": 0, "overdue": []},
+                    {"completed": 0, "in_review": 0, "pending": 0, "overdue": []},
                 )
                 if t["status"] == "done":
                     entry["completed"] += 1
+                elif t["status"] == "review":
+                    entry["in_review"] += 1
                 else:
                     entry["pending"] += 1
                     if t["due_date"] is not None and t["due_date"] < today:
@@ -576,7 +774,12 @@ class Tasks(commands.Cog):
 
             person_lines: list[str] = []
             for assignee_id, entry in per_person.items():
-                line = f"**<@{assignee_id}>** — ✅ {entry['completed']} · 🔵 {entry['pending']}"
+                line = (
+                    f"**<@{assignee_id}>** — "
+                    f"✅ {entry['completed']} · "
+                    f"⏳ {entry['in_review']} · "
+                    f"🔵 {entry['pending']}"
+                )
                 if entry["overdue"]:
                     oldest = min(entry["overdue"], key=lambda t: t["due_date"])
                     line += (
@@ -590,7 +793,10 @@ class Tasks(commands.Cog):
                 per_person_text = per_person_text[:1000].rsplit("\n", 1)[0] + "\n…(truncated)"
 
             upcoming = sorted(
-                (t for t in tasks if t["status"] != "done" and t["due_date"] is not None),
+                (
+                    t for t in tasks
+                    if t["status"] not in ("done", "review") and t["due_date"] is not None
+                ),
                 key=lambda t: t["due_date"],
             )[:5]
 
@@ -617,14 +823,13 @@ class Tasks(commands.Cog):
 
             await interaction.response.send_message(
                 embed=embed,
-                ephemeral=not is_admin,
+                ephemeral=True,
                 allowed_mentions=discord.AllowedMentions(users=False),
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 2: mentions instead of display names
     @app_commands.command(name="pingteam", description="Ping @Growth with all current pending tasks.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def pingteam(self, interaction: discord.Interaction):
@@ -674,11 +879,15 @@ class Tasks(commands.Cog):
                 message,
                 allowed_mentions=discord.AllowedMentions(roles=[role], users=False),
             )
+
+            await self.notify_admin(
+                interaction, "pingteam",
+                f"Pinged @Growth with {len(pending)} pending task(s)",
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 2: mentions in delivery report; CHANGE 7: public for admins
     @app_commands.command(name="dmtasks", description="DM team member(s) their pending tasks.")
     @app_commands.describe(member="Optional: DM only this member")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -694,11 +903,9 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            is_admin = _is_admin(interaction)
-
             if member is not None:
                 tasks = get_tasks_by_user(interaction.guild.id, member.id)
-                pending = [t for t in tasks if t["status"] != "done"]
+                pending = [t for t in tasks if t["status"] not in ("done",)]
 
                 if not pending:
                     await interaction.response.send_message(
@@ -713,8 +920,12 @@ class Tasks(commands.Cog):
                     await user.send("\n".join(lines))
                     await interaction.response.send_message(
                         f"✅ DMed {member.mention} their pending tasks.",
-                        ephemeral=not is_admin,
+                        ephemeral=True,
                         allowed_mentions=discord.AllowedMentions(users=False),
+                    )
+                    await self.notify_admin(
+                        interaction, "dmtasks",
+                        f"DMed {member.mention} their pending tasks ({len(pending)} tasks)",
                     )
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     await interaction.response.send_message(
@@ -725,7 +936,7 @@ class Tasks(commands.Cog):
                 return
 
             all_tasks = get_all_tasks(interaction.guild.id)
-            pending = [t for t in all_tasks if t["status"] != "done"]
+            pending = [t for t in all_tasks if t["status"] not in ("done",)]
 
             grouped: dict[str, list[dict]] = {}
             for t in pending:
@@ -770,8 +981,14 @@ class Tasks(commands.Cog):
 
             await interaction.response.send_message(
                 reply,
-                ephemeral=not is_admin,
+                ephemeral=True,
                 allowed_mentions=discord.AllowedMentions(users=False),
+            )
+
+            await self.notify_admin(
+                interaction, "dmtasks",
+                f"DMed {len(successfully_dmed)} member(s) their tasks "
+                f"({len(failed_to_dm)} failed)",
             )
         except Exception:
             traceback.print_exc()
@@ -817,11 +1034,15 @@ class Tasks(commands.Cog):
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass
+
+            await self.notify_admin(
+                interaction, "addmember",
+                f"Added {member.mention} to the Growth team",
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 3: set per-person reminder channel
     @app_commands.command(name="setchannel", description="Set the reminder channel for a member.")
     @app_commands.describe(
         member="Member to configure reminders for",
@@ -846,11 +1067,15 @@ class Tasks(commands.Cog):
                 f"✅ Reminders for {member.mention} will be sent to {channel.mention}.",
                 ephemeral=True,
             )
+
+            await self.notify_admin(
+                interaction, "setchannel",
+                f"Set {member.mention}'s reminders to {channel.mention}",
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 4: manually trigger a reminder in-channel
     @app_commands.command(name="remind", description="Remind a member of their pending tasks in this channel.")
     @app_commands.describe(member="Member to remind")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -868,12 +1093,11 @@ class Tasks(commands.Cog):
 
             tasks = get_tasks_by_user(interaction.guild.id, member.id)
             pending = _sort_pending(tasks)
-            is_admin = _is_admin(interaction)
 
             if not pending:
                 await interaction.response.send_message(
                     f"⚠️ {member.mention} has no pending tasks.",
-                    ephemeral=not is_admin,
+                    ephemeral=True,
                     allowed_mentions=discord.AllowedMentions(users=False),
                 )
                 return
@@ -885,15 +1109,19 @@ class Tasks(commands.Cog):
                     f"{emoji} #{t['id']} — {t['task_name']} · Due: {_format_due(t['due_date'])}"
                 )
             lines.append("")
-            lines.append("Use /done [id] to mark a task complete.")
+            lines.append("Use /done [id] to submit a task for review.")
             lines.append("*(This message is visible to all members in this channel.)*")
 
             await interaction.response.send_message("\n".join(lines), ephemeral=False)
+
+            await self.notify_admin(
+                interaction, "remind",
+                f"Sent task reminder to {member.mention} ({len(pending)} pending task(s))",
+            )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 5: list Growth team members with task counts
     @app_commands.command(name="teammembers", description="List all Growth team members and their task counts.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def teammembers(self, interaction: discord.Interaction):
@@ -921,7 +1149,6 @@ class Tasks(commands.Cog):
                 else:
                     entry["pending"] += 1
 
-            is_admin = _is_admin(interaction)
             lines = [f"👥 Growth Team Members ({len(role.members)} total):", ""]
             for m in role.members:
                 entry = counts.get(str(m.id), {"pending": 0, "completed": 0})
@@ -932,14 +1159,13 @@ class Tasks(commands.Cog):
 
             await interaction.response.send_message(
                 "\n".join(lines),
-                ephemeral=not is_admin,
+                ephemeral=True,
                 allowed_mentions=discord.AllowedMentions(users=False),
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    # CHANGE 6: mark own task as in progress
     @app_commands.command(name="inprogress", description="Mark a task as in progress.")
     @app_commands.describe(task_id="The task ID")
     async def inprogress(self, interaction: discord.Interaction, task_id: int):
@@ -972,6 +1198,11 @@ class Tasks(commands.Cog):
             update_task_status(task_id, "in_progress")
             await interaction.response.send_message(
                 f"🟡 {interaction.user.mention} is now working on task #{task_id}: {task['task_name']}"
+            )
+
+            await self.notify_admin(
+                interaction, "inprogress",
+                f"{interaction.user.mention} started working on task #{task_id}: {task['task_name']}",
             )
         except Exception:
             traceback.print_exc()

@@ -250,16 +250,17 @@ class DatabaseTests(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # Test 13 — get_tasks_for_progress, since_date=tomorrow (task excluded)
+    # Test 13 — get_tasks_for_progress, since_date=far future (task excluded)
     # ------------------------------------------------------------------
     def test_13_progress_future_filter(self):
         self.assertIsNotNone(DatabaseTests.task_id, "no task_id from Test 2")
-        tomorrow = date.today() + timedelta(days=1)
-        tasks = get_tasks_for_progress(TEST_GUILD_ID, since_date=tomorrow)
+        # Use a date far enough out that no timezone offset can bridge the gap
+        far_future = date.today() + timedelta(days=365)
+        tasks = get_tasks_for_progress(TEST_GUILD_ID, since_date=far_future)
         ids = [t["id"] for t in tasks]
         self.assertNotIn(
             DatabaseTests.task_id, ids,
-            "test task should not appear with a future since_date filter",
+            "test task should not appear with a far-future since_date filter",
         )
 
     # ------------------------------------------------------------------
@@ -306,8 +307,19 @@ class DatabaseTests(unittest.TestCase):
     # Test 16 — get_unreminded_due_tasks
     # ------------------------------------------------------------------
     def test_16_get_unreminded_due_tasks(self):
+        # Fetch the server's CURRENT_DATE so due_date values match DB-side comparisons
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT CURRENT_DATE, CURRENT_DATE + 2")
+                row = cur.fetchone()
+                server_today = row[0]
+                server_2day = row[1]
+        finally:
+            conn.close()
+
         # Insert a task due in exactly 2 days (unreminded)
-        due_2day = (date.today() + timedelta(days=2)).isoformat()
+        due_2day = server_2day.isoformat()
         task_id_3 = insert_task(
             guild_id=TEST_GUILD_ID,
             assignee_id=TEST_USER_ID,
@@ -319,7 +331,7 @@ class DatabaseTests(unittest.TestCase):
         DatabaseTests.task_id_3 = task_id_3
 
         # Insert a task due today (unreminded)
-        due_today = date.today().isoformat()
+        due_today = server_today.isoformat()
         task_id_4 = insert_task(
             guild_id=TEST_GUILD_ID,
             assignee_id=TEST_USER_ID,

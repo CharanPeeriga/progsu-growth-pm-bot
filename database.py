@@ -26,6 +26,10 @@ def run_migration():
                 """
                 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminded_2day BOOLEAN DEFAULT FALSE;
                 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminded_day_of BOOLEAN DEFAULT FALSE;
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS rejection_reason TEXT DEFAULT NULL;
+                ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_status_check;
+                ALTER TABLE tasks ADD CONSTRAINT tasks_status_check
+                    CHECK (status IN ('todo', 'in_progress', 'review', 'done'));
                 CREATE TABLE IF NOT EXISTS reminder_channels (
                     id BIGSERIAL PRIMARY KEY,
                     guild_id TEXT NOT NULL,
@@ -182,7 +186,7 @@ def get_unreminded_due_tasks():
                        due_date, status, created_at
                 FROM tasks
                 WHERE due_date = CURRENT_DATE + INTERVAL '2 days'
-                  AND status <> 'done'
+                  AND status IN ('todo', 'in_progress')
                   AND reminded_2day = FALSE
                 """
             )
@@ -194,7 +198,7 @@ def get_unreminded_due_tasks():
                        due_date, status, created_at
                 FROM tasks
                 WHERE due_date = CURRENT_DATE
-                  AND status <> 'done'
+                  AND status IN ('todo', 'in_progress')
                   AND reminded_day_of = FALSE
                 """
             )
@@ -225,6 +229,51 @@ def mark_reminded_day_of(task_id):
             cur.execute(
                 "UPDATE tasks SET reminded_day_of = TRUE WHERE id = %s",
                 (task_id,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_tasks_in_review(guild_id):
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, guild_id, assignee_id, assigner_id, task_name,
+                       due_date, status, created_at
+                FROM tasks
+                WHERE guild_id = %s AND status = 'review'
+                ORDER BY created_at
+                """,
+                (str(guild_id),),
+            )
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def approve_task(task_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET status = 'done', rejection_reason = NULL WHERE id = %s",
+                (task_id,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reject_task(task_id, reason):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET status = 'in_progress', rejection_reason = %s WHERE id = %s",
+                (reason, task_id),
             )
         conn.commit()
     finally:

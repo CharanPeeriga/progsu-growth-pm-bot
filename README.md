@@ -11,8 +11,11 @@ A Discord bot for managing tasks across the progsu Growth Team. Assign tasks, tr
 | `/assign @member "task" due:YYYY-MM-DD` | Assign a task to a team member. Due date optional. |
 | `/mytasks` | See your own pending tasks (only visible to you). |
 | `/teamtasks @member (optional)` | See all team tasks or filter by member. |
-| `/done task_id` | Mark your task as complete. Notifies the assigner. |
-| `/settaskstatus task_id status` | Update a task to todo, in_progress, or done. |
+| `/done task_id` | Submit a task for admin review. Only the assignee can use this. |
+| `/approve task_id` | Approve a reviewed task and mark it complete. Admin only. |
+| `/reject task_id reason` | Send a task back to in_progress with feedback. Admin only. |
+| `/reviewqueue` | See all tasks currently waiting for approval. Admin only. |
+| `/settaskstatus task_id status` | Update a task to todo, in_progress, review, or done. |
 | `/edittask task_id` | Edit a task's name and/or due date. Use "none" to clear the due date. |
 | `/deletetask task_id` | Permanently delete a task. Admin only. |
 | `/alltasks` | List every task across all statuses, sorted by status then due date. Admin only. |
