@@ -28,8 +28,10 @@ intents.guilds = True
 class PMBot(commands.Bot):
     async def setup_hook(self) -> None:
         from cogs.views import TaskActionView
+        from cogs.notify_server import start_notify_server
         self.add_view(TaskActionView(0, "0", "", mode="member"))
         self.add_view(TaskActionView(0, "0", "", mode="review"))
+        await start_notify_server(self)
 
 
 bot = PMBot(command_prefix="!", intents=intents)
