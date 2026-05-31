@@ -65,6 +65,7 @@ TEAM_CHOICES = [
     app_commands.Choice(name="Growth", value="growth"),
     app_commands.Choice(name="Tech", value="tech"),
     app_commands.Choice(name="Operations", value="operations"),
+    app_commands.Choice(name="Progirls", value="progirls"),
 ]
 
 GENERIC_ERROR = (
@@ -365,7 +366,7 @@ class Tasks(commands.Cog):
                 by_team.setdefault(row["team"], []).append(f"<@{row['user_id']}>")
 
             lines = ["👑 VPs:", ""]
-            for team_value in ("growth", "tech", "operations"):
+            for team_value in ("growth", "tech", "operations", "progirls"):
                 mentions = ", ".join(by_team.get(team_value, [])) or "*(none)*"
                 lines.append(f"**{team_value.capitalize()}:** {mentions}")
 
