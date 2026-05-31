@@ -51,6 +51,27 @@ def run_migration():
     finally:
         conn.close()
 
+    # Migrate vp_roles to support multiple teams per user.
+    # Drops the old (guild_id, user_id) unique constraint and replaces it
+    # with (guild_id, user_id, team) so one person can VP multiple teams.
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE vp_roles DROP CONSTRAINT IF EXISTS vp_roles_guild_id_user_id_key"
+            )
+            cur.execute(
+                """
+                ALTER TABLE vp_roles ADD CONSTRAINT vp_roles_guild_id_user_id_team_key
+                    UNIQUE (guild_id, user_id, team)
+                """
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
 
 def insert_task(guild_id, assignee_id, assigner_id, task_name, due_date, team="growth"):
     conn = get_connection()
@@ -180,6 +201,7 @@ def delete_task(task_id):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM task_collaborators WHERE task_id = %s", (task_id,))
             cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
             deleted = cur.rowcount
         conn.commit()
@@ -267,20 +289,32 @@ def mark_reminded_day_of(task_id):
         conn.close()
 
 
-def get_tasks_in_review(guild_id):
+def get_tasks_in_review(guild_id, team=None):
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, guild_id, assignee_id, assigner_id, task_name,
-                       due_date, status, created_at, rejection_reason
-                FROM tasks
-                WHERE guild_id = %s AND status = 'review'
-                ORDER BY created_at
-                """,
-                (str(guild_id),),
-            )
+            if team is not None:
+                cur.execute(
+                    """
+                    SELECT id, guild_id, assignee_id, assigner_id, task_name,
+                           due_date, status, created_at, rejection_reason, team
+                    FROM tasks
+                    WHERE guild_id = %s AND status = 'review' AND team = %s
+                    ORDER BY created_at
+                    """,
+                    (str(guild_id), team),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, guild_id, assignee_id, assigner_id, task_name,
+                           due_date, status, created_at, rejection_reason, team
+                    FROM tasks
+                    WHERE guild_id = %s AND status = 'review'
+                    ORDER BY created_at
+                    """,
+                    (str(guild_id),),
+                )
             return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
@@ -466,6 +500,21 @@ def is_team_member(guild_id, user_id):
         conn.close()
 
 
+def get_member_team(guild_id, user_id):
+    """Returns the team string for a team member, or None if not in team_members."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT team FROM team_members WHERE guild_id = %s AND user_id = %s",
+                (str(guild_id), str(user_id)),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # VP role functions
 # ---------------------------------------------------------------------------
@@ -478,9 +527,8 @@ def set_vp(guild_id, user_id, team, added_by):
                 """
                 INSERT INTO vp_roles (guild_id, user_id, team, added_by)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT (guild_id, user_id) DO UPDATE
-                    SET team = EXCLUDED.team,
-                        added_by = EXCLUDED.added_by
+                ON CONFLICT (guild_id, user_id, team) DO UPDATE
+                    SET added_by = EXCLUDED.added_by
                 """,
                 (str(guild_id), str(user_id), team, str(added_by)),
             )
@@ -502,7 +550,8 @@ def remove_vp(guild_id, user_id):
         conn.close()
 
 
-def get_vp(guild_id, user_id):
+def get_vp_roles(guild_id, user_id):
+    """Returns all VP role rows for this user (list, empty if not a VP)."""
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -511,26 +560,25 @@ def get_vp(guild_id, user_id):
                 SELECT id, guild_id, user_id, team, added_by, added_at
                 FROM vp_roles
                 WHERE guild_id = %s AND user_id = %s
+                ORDER BY added_at
                 """,
                 (str(guild_id), str(user_id)),
             )
-            row = cur.fetchone()
-            return dict(row) if row else None
+            return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
 
 
 def get_team_for_user(guild_id, user_id):
-    """Returns the team string for a VP, or None if not a VP."""
+    """Returns list of teams the user is VP of, or [] if not a VP."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT team FROM vp_roles WHERE guild_id = %s AND user_id = %s",
+                "SELECT team FROM vp_roles WHERE guild_id = %s AND user_id = %s ORDER BY added_at",
                 (str(guild_id), str(user_id)),
             )
-            row = cur.fetchone()
-            return row[0] if row else None
+            return [row[0] for row in cur.fetchall()]
     finally:
         conn.close()
 

@@ -1,7 +1,7 @@
 import discord
 from discord.ui import View, Button, Modal, TextInput
 
-from database import is_vp
+from database import is_vp, get_collaborators
 
 
 class RejectModal(Modal, title="Reject Task"):
@@ -33,6 +33,19 @@ class RejectModal(Modal, title="Reject Task"):
             )
         except Exception:
             pass
+        for c in get_collaborators(self.task_id):
+            if c["user_id"] == self.assignee_id:
+                continue
+            try:
+                cu = await interaction.client.fetch_user(int(c["user_id"]))
+                await cu.send(
+                    f"↩️ Task sent back — growth-pm-bot\n"
+                    f"Task #{self.task_id}: {self.task_name}\n"
+                    f"Feedback: {self.reason.value}\n"
+                    f"Use /done {self.task_id} to resubmit when ready."
+                )
+            except Exception:
+                pass
         await interaction.response.send_message(
             f"↩️ Task #{self.task_id} sent back with feedback.", ephemeral=True
         )
@@ -176,6 +189,18 @@ class ApproveButton(Button):
             )
         except Exception:
             pass
+        for c in get_collaborators(self.task_id):
+            if c["user_id"] == self.assignee_id:
+                continue
+            try:
+                cu = await interaction.client.fetch_user(int(c["user_id"]))
+                await cu.send(
+                    f"✅ Task approved — growth-pm-bot\n"
+                    f"Task #{self.task_id}: {self.task_name} was approved.\n"
+                    f"Great work!"
+                )
+            except Exception:
+                pass
         await interaction.response.send_message(
             f"✅ Task #{self.task_id} approved: {self.task_name}", ephemeral=True
         )

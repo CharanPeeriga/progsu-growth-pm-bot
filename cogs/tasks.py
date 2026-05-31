@@ -1,7 +1,7 @@
 import re
 import traceback
 from datetime import datetime, date, timedelta
-from typing import Optional
+from typing import Optional, Union
 
 import discord
 from discord import app_commands
@@ -31,10 +31,11 @@ from database import (
     is_team_member,
     set_vp,
     remove_vp,
-    get_vp,
+    get_vp_roles,
     get_team_for_user,
     is_vp,
     get_all_vps,
+    get_member_team,
     set_team_channel,
     add_collaborator,
     get_collaborators,
@@ -122,6 +123,43 @@ def _parse_user_ids(text: str) -> list[str]:
     return re.findall(r"<@!?(\d+)>", text)
 
 
+# ---------------------------------------------------------------------------
+# VP / team helper functions
+# ---------------------------------------------------------------------------
+
+def _get_team_ids_for_vp(guild_id, caller_team: list[str]) -> set[str]:
+    """Returns the set of member user_ids across all of a VP's teams."""
+    result: set[str] = set()
+    for t in caller_team:
+        result |= {r["user_id"] for r in get_team_members(guild_id, team=t)}
+    return result
+
+
+def _get_all_tasks_for_vp(guild_id, caller_team: list[str]) -> list[dict]:
+    """Returns all tasks from all of a VP's teams, deduplicated and sorted."""
+    if len(caller_team) == 1:
+        return get_all_tasks(guild_id, team=caller_team[0])
+    seen: dict[int, dict] = {}
+    for t in caller_team:
+        for task in get_all_tasks(guild_id, team=t):
+            seen[task["id"]] = task
+    return sorted(
+        seen.values(),
+        key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
+    )
+
+
+def _get_members_for_vp(guild_id, caller_team: list[str]) -> list[dict]:
+    """Returns team_members rows across all of a VP's teams, deduplicated."""
+    if len(caller_team) == 1:
+        return get_team_members(guild_id, team=caller_team[0])
+    seen: dict[str, dict] = {}
+    for t in caller_team:
+        for m in get_team_members(guild_id, team=t):
+            seen[m["user_id"]] = m
+    return list(seen.values())
+
+
 async def _send_generic_error(interaction: discord.Interaction) -> None:
     try:
         if interaction.response.is_done():
@@ -132,21 +170,25 @@ async def _send_generic_error(interaction: discord.Interaction) -> None:
         traceback.print_exc()
 
 
-async def get_caller_team(interaction: discord.Interaction) -> Optional[str]:
-    """Returns 'all' for admins, a team string for VPs, or None for regular members."""
+async def get_caller_team(
+    interaction: discord.Interaction,
+) -> Union[str, list[str]]:
+    """
+    Returns 'all' for admins, a list of team strings for VPs (may be multiple),
+    or an empty list [] for regular members.
+    """
     if interaction.guild is None:
-        return None
+        return []
     if interaction.user.guild_permissions.manage_guild:
         return "all"
-    if is_vp(str(interaction.guild.id), str(interaction.user.id)):
-        return get_team_for_user(str(interaction.guild.id), str(interaction.user.id))
-    return None
+    teams = get_team_for_user(str(interaction.guild.id), str(interaction.user.id))
+    return teams  # list, empty if not a VP
 
 
 async def require_admin_or_vp(interaction: discord.Interaction) -> bool:
     """Sends an error and returns False if the caller is not an admin or VP."""
     caller_team = await get_caller_team(interaction)
-    if caller_team is None:
+    if caller_team != "all" and not caller_team:
         await interaction.response.send_message(
             "❌ You don't have permission to use this command.", ephemeral=True
         )
@@ -228,8 +270,17 @@ class Tasks(commands.Cog):
             await _send_generic_error(interaction)
 
     @app_commands.command(name="removevp", description="Remove a member's VP role.")
-    @app_commands.describe(member="Member to remove VP from")
-    async def removevp(self, interaction: discord.Interaction, member: discord.Member):
+    @app_commands.describe(
+        member="Member to remove VP from",
+        team="Specific team to remove (leave blank to remove all VP roles)",
+    )
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def removevp(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        team: Optional[app_commands.Choice[str]] = None,
+    ):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -243,7 +294,8 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            if not get_vp(interaction.guild.id, member.id):
+            roles = get_vp_roles(interaction.guild.id, member.id)
+            if not roles:
                 await interaction.response.send_message(
                     f"⚠️ {member.mention} is not a VP.",
                     ephemeral=True,
@@ -251,14 +303,41 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            remove_vp(interaction.guild.id, member.id)
-            await interaction.response.send_message(
-                f"✅ {member.mention} has been removed as VP."
-            )
+            if team is not None:
+                # Remove from a specific team only
+                matching = [r for r in roles if r["team"] == team.value]
+                if not matching:
+                    await interaction.response.send_message(
+                        f"⚠️ {member.mention} is not VP of the **{team.value}** team.",
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions(users=False),
+                    )
+                    return
+                from database import get_connection
+                import psycopg2
+                conn = get_connection()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM vp_roles WHERE guild_id = %s AND user_id = %s AND team = %s",
+                            (str(interaction.guild.id), str(member.id), team.value),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                await interaction.response.send_message(
+                    f"✅ {member.mention} has been removed as VP of **{team.value}**."
+                )
+            else:
+                remove_vp(interaction.guild.id, member.id)
+                await interaction.response.send_message(
+                    f"✅ {member.mention} has been removed as VP."
+                )
 
             await self.notify_admin(
                 interaction, "removevp",
-                f"Removed {member.mention} as VP",
+                f"Removed {member.mention} as VP"
+                + (f" of {team.value}" if team else " (all teams)"),
             )
         except Exception:
             traceback.print_exc()
@@ -280,12 +359,15 @@ class Tasks(commands.Cog):
                 return
 
             vps = get_all_vps(interaction.guild.id)
-            by_team: dict[str, str] = {row["team"]: f"<@{row['user_id']}>" for row in vps}
+
+            by_team: dict[str, list[str]] = {}
+            for row in vps:
+                by_team.setdefault(row["team"], []).append(f"<@{row['user_id']}>")
 
             lines = ["👑 VPs:", ""]
             for team_value in ("growth", "tech", "operations"):
-                mention = by_team.get(team_value, "*(none)*")
-                lines.append(f"**{team_value.capitalize()}:** {mention}")
+                mentions = ", ".join(by_team.get(team_value, [])) or "*(none)*"
+                lines.append(f"**{team_value.capitalize()}:** {mentions}")
 
             await interaction.response.send_message(
                 "\n".join(lines),
@@ -319,7 +401,7 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            if caller_team != "all" and caller_team != team.value:
+            if caller_team != "all" and team.value not in caller_team:
                 await interaction.response.send_message(
                     "❌ You can only set channels for your own team.", ephemeral=True
                 )
@@ -349,7 +431,9 @@ class Tasks(commands.Cog):
         task="Task description",
         due="Optional due date (YYYY-MM-DD)",
         collaborators="Optional: mention collaborators e.g. @user1 @user2",
+        team="Team for the task (required if you are VP of multiple teams)",
     )
+    @app_commands.choices(team=TEAM_CHOICES)
     async def assign(
         self,
         interaction: discord.Interaction,
@@ -357,6 +441,7 @@ class Tasks(commands.Cog):
         task: str,
         due: Optional[str] = None,
         collaborators: Optional[str] = None,
+        team: Optional[app_commands.Choice[str]] = None,
     ):
         try:
             if interaction.guild is None:
@@ -369,7 +454,37 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            team = caller_team if caller_team != "all" else "growth"
+            if caller_team == "all":
+                effective_team = team.value if team is not None else "growth"
+            elif team is not None:
+                if team.value not in caller_team:
+                    await interaction.response.send_message(
+                        "❌ You can only assign tasks within your own team.", ephemeral=True
+                    )
+                    return
+                effective_team = team.value
+            elif len(caller_team) > 1:
+                await interaction.response.send_message(
+                    "⚠️ You are VP of multiple teams. Please specify a team with the `team:` parameter.",
+                    ephemeral=True,
+                )
+                return
+            else:
+                effective_team = caller_team[0]
+
+            # BUG 3: when no explicit team: param, use the assignee's registered team
+            assignee_team_warn = ""
+            if team is None:
+                assignee_db_team = get_member_team(
+                    str(interaction.guild.id), str(member.id)
+                )
+                if assignee_db_team:
+                    effective_team = assignee_db_team
+                elif caller_team != "all":
+                    assignee_team_warn = (
+                        "\n*(Note: assignee not found in team roster — "
+                        "task assigned to your team by default)*"
+                    )
 
             due_date: Optional[date] = None
             if due is not None and due.strip() != "":
@@ -388,10 +503,9 @@ class Tasks(commands.Cog):
                 assigner_id=interaction.user.id,
                 task_name=task,
                 due_date=due_date,
-                team=team,
+                team=effective_team,
             )
 
-            # Parse and register collaborators
             collab_ids: list[str] = []
             if collaborators:
                 collab_ids = _parse_user_ids(collaborators)
@@ -399,26 +513,27 @@ class Tasks(commands.Cog):
                     add_collaborator(task_id, uid)
 
             due_str = _format_due(due_date)
-
             member_view = TaskActionView(task_id, str(member.id), task, mode="member")
+
             if collab_ids:
                 collab_mentions = ", ".join(f"<@{uid}>" for uid in collab_ids)
                 await interaction.response.send_message(
                     f"✅ Task #{task_id} assigned to {member.mention}\n"
                     f"📋 {task}\n"
                     f"📅 Due: {due_str}\n"
-                    f"🤝 Collaborators: {collab_mentions}",
+                    f"🤝 Collaborators: {collab_mentions}"
+                    + assignee_team_warn,
                     view=member_view,
                 )
             else:
                 await interaction.response.send_message(
                     f"✅ Task #{task_id} assigned to {member.mention}\n"
                     f"📋 {task}\n"
-                    f"📅 Due: {due_str}",
+                    f"📅 Due: {due_str}"
+                    + assignee_team_warn,
                     view=member_view,
                 )
 
-            # DM primary assignee
             try:
                 await member.send(
                     f"📋 New task assigned by {interaction.user.display_name}\n"
@@ -429,7 +544,6 @@ class Tasks(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-            # DM each collaborator
             for uid in collab_ids:
                 try:
                     collab_user = await self.bot.fetch_user(int(uid))
@@ -446,7 +560,7 @@ class Tasks(commands.Cog):
 
             await self.notify_admin(
                 interaction, "assign",
-                f"Assigned task #{task_id} '{task}' to {member.mention} [{team} team]"
+                f"Assigned task #{task_id} '{task}' to {member.mention} [{effective_team} team]"
                 + (f" with {len(collab_ids)} collaborator(s)" if collab_ids else ""),
             )
         except Exception:
@@ -516,20 +630,13 @@ class Tasks(commands.Cog):
                         f"{emoji} #{ct['id']} — {ct['task_name']} "
                         f"· Due: {_format_due(ct['due_date'])}"
                     )
-                    if ct["submitted"]:
-                        task_label += "\n   ✅ Your part submitted"
-                    else:
-                        all_c = get_collaborators(ct["id"])
-                        others_pending = [
-                            c for c in all_c
-                            if not c["submitted"]
-                            and c["user_id"] != str(interaction.user.id)
-                        ]
-                        if others_pending:
-                            mentions = ", ".join(
-                                f"<@{c['user_id']}>" for c in others_pending
-                            )
-                            task_label += f"\n   Waiting on: {mentions}"
+                    all_c = get_collaborators(ct["id"])
+                    for c in all_c:
+                        icon = "✅" if c["submitted"] else "⏳"
+                        if c["user_id"] == str(interaction.user.id):
+                            task_label += f"\n   {icon} You"
+                        else:
+                            task_label += f"\n   {icon} <@{c['user_id']}>"
                     lines.append(task_label)
                 lines.append("")
 
@@ -567,20 +674,38 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            if team is not None:
-                effective_team = team.value
-            else:
-                caller_team = await get_caller_team(interaction)
-                effective_team = (
-                    caller_team if caller_team not in (None, "all") else None
-                )
-
+            caller_team = await get_caller_team(interaction)
             collab_map = get_all_task_collaborators(interaction.guild.id)
 
+            # Determine task source
+            if team is not None:
+                # Explicit team param wins for everyone
+                effective_team: Optional[str] = team.value
+                use_vp_multi = False
+            elif caller_team == "all" or not caller_team:
+                effective_team = None
+                use_vp_multi = False
+            elif len(caller_team) == 1:
+                effective_team = caller_team[0]
+                use_vp_multi = False
+            else:
+                # Multi-team VP, no explicit param — show all their teams
+                effective_team = None
+                use_vp_multi = True
+
             if member is not None:
-                tasks = get_tasks_by_user(
-                    interaction.guild.id, member.id, team=effective_team
-                )
+                if use_vp_multi:
+                    all_member_tasks = []
+                    for t in caller_team:
+                        all_member_tasks.extend(
+                            get_tasks_by_user(interaction.guild.id, member.id, team=t)
+                        )
+                    seen: dict[int, dict] = {t["id"]: t for t in all_member_tasks}
+                    tasks = list(seen.values())
+                else:
+                    tasks = get_tasks_by_user(
+                        interaction.guild.id, member.id, team=effective_team
+                    )
                 pending = _sort_pending(tasks)
 
                 if not pending:
@@ -600,7 +725,10 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            all_tasks = get_all_tasks(interaction.guild.id, team=effective_team)
+            if use_vp_multi:
+                all_tasks = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
+            else:
+                all_tasks = get_all_tasks(interaction.guild.id, team=effective_team)
             pending = _sort_pending(all_tasks)
 
             if not pending:
@@ -670,7 +798,6 @@ class Tasks(commands.Cog):
                 return
 
             if collabs:
-                # Collaborative task: track per-person submission
                 if is_collab:
                     submit_collaborator(task_id, interaction.user.id)
 
@@ -681,7 +808,6 @@ class Tasks(commands.Cog):
                         f"📋 {task['task_name']}\n"
                         f"Waiting for admin approval."
                     )
-                    # DM every collaborator
                     for c in collabs:
                         try:
                             cu = await self.bot.fetch_user(int(c["user_id"]))
@@ -692,7 +818,6 @@ class Tasks(commands.Cog):
                             )
                         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                             pass
-                    # Notify owner
                     try:
                         owner = await self.bot.fetch_user(interaction.guild.owner_id)
                         await owner.send(
@@ -720,7 +845,6 @@ class Tasks(commands.Cog):
                         allowed_mentions=discord.AllowedMentions(users=False),
                     )
             else:
-                # Single-assignee task: existing flow
                 update_task_status(task_id, "review")
                 await interaction.response.send_message(
                     f"⏳ {interaction.user.mention} submitted task #{task_id} for review:\n"
@@ -774,9 +898,11 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            if task["status"] == "in_progress":
+            if task["status"] != "todo":
                 await interaction.response.send_message(
-                    f"⚠️ Task #{task_id} is already in progress.", ephemeral=True
+                    f"⚠️ Task #{task_id} cannot be moved to in progress "
+                    f"— current status: {task['status']}.",
+                    ephemeral=True,
                 )
                 return
 
@@ -821,10 +947,7 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team != "all":
-                team_ids = {
-                    r["user_id"]
-                    for r in get_team_members(interaction.guild.id, team=caller_team)
-                }
+                team_ids = _get_team_ids_for_vp(interaction.guild.id, caller_team)
                 if task["assignee_id"] not in team_ids:
                     await interaction.response.send_message(
                         f"❌ Task #{task_id} is not in your team.", ephemeral=True
@@ -855,6 +978,19 @@ class Tasks(commands.Cog):
                 )
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
+
+            for c in get_collaborators(task_id):
+                if c["user_id"] == task["assignee_id"]:
+                    continue
+                try:
+                    cu = await self.bot.fetch_user(int(c["user_id"]))
+                    await cu.send(
+                        f"✅ Task approved — growth-pm-bot\n"
+                        f"Task #{task_id}: {task['task_name']} was approved.\n"
+                        f"Great work!"
+                    )
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
 
             await self.notify_admin(
                 interaction, "approve",
@@ -892,10 +1028,7 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team != "all":
-                team_ids = {
-                    r["user_id"]
-                    for r in get_team_members(interaction.guild.id, team=caller_team)
-                }
+                team_ids = _get_team_ids_for_vp(interaction.guild.id, caller_team)
                 if task["assignee_id"] not in team_ids:
                     await interaction.response.send_message(
                         f"❌ Task #{task_id} is not in your team.", ephemeral=True
@@ -928,6 +1061,20 @@ class Tasks(commands.Cog):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
 
+            for c in get_collaborators(task_id):
+                if c["user_id"] == task["assignee_id"]:
+                    continue
+                try:
+                    cu = await self.bot.fetch_user(int(c["user_id"]))
+                    await cu.send(
+                        f"↩️ Task sent back — growth-pm-bot\n"
+                        f"Task #{task_id}: {task['task_name']}\n"
+                        f"Feedback: {reason}\n"
+                        f"Use /done {task_id} to resubmit when ready."
+                    )
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+
             await self.notify_admin(
                 interaction, "reject",
                 f"Rejected task #{task_id}: {task['task_name']} — Reason: {reason}",
@@ -950,7 +1097,7 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team != "all":
-                all_team = get_all_tasks(interaction.guild.id, team=caller_team)
+                all_team = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
                 tasks = [t for t in all_team if t["status"] == "review"]
                 tasks.sort(key=lambda t: t["created_at"])
             else:
@@ -1130,10 +1277,7 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team != "all":
-                team_ids = {
-                    r["user_id"]
-                    for r in get_team_members(interaction.guild.id, team=caller_team)
-                }
+                team_ids = _get_team_ids_for_vp(interaction.guild.id, caller_team)
                 if task["assignee_id"] not in team_ids:
                     await interaction.response.send_message(
                         f"❌ Task #{task_id} is not in your team.", ephemeral=True
@@ -1170,10 +1314,11 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            tasks = get_all_tasks(
-                interaction.guild.id,
-                team=None if caller_team == "all" else caller_team,
-            )
+            if caller_team == "all":
+                tasks = get_all_tasks(interaction.guild.id)
+            else:
+                tasks = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
+
             collab_map = get_all_task_collaborators(interaction.guild.id)
 
             if not tasks:
@@ -1231,7 +1376,7 @@ class Tasks(commands.Cog):
     @app_commands.command(name="progress", description="Team progress snapshot.")
     @app_commands.describe(
         timeframe="Reporting window (defaults to This Week)",
-        team="Optional: filter by team (admin only)",
+        team="Filter by team (required if you are VP of multiple teams)",
     )
     @app_commands.choices(timeframe=TIMEFRAME_CHOICES, team=TEAM_CHOICES)
     async def progress(
@@ -1255,10 +1400,24 @@ class Tasks(commands.Cog):
             window_label = "This Week" if window == "this_week" else "All Time"
             since_date = date.today() - timedelta(days=7) if window == "this_week" else None
 
-            effective_team = (
-                caller_team if caller_team != "all"
-                else (team.value if team is not None else None)
-            )
+            # Resolve effective team
+            if caller_team == "all":
+                effective_team = team.value if team is not None else None
+            elif team is not None:
+                if team.value not in caller_team:
+                    await interaction.response.send_message(
+                        "❌ You can only view progress for your own team.", ephemeral=True
+                    )
+                    return
+                effective_team = team.value
+            elif len(caller_team) > 1:
+                await interaction.response.send_message(
+                    "⚠️ You are VP of multiple teams. Please specify a team with the `team:` parameter.",
+                    ephemeral=True,
+                )
+                return
+            else:
+                effective_team = caller_team[0]
 
             if effective_team is not None:
                 all_team_tasks = get_tasks_for_team(interaction.guild.id, effective_team)
@@ -1380,21 +1539,20 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            all_tasks = get_all_tasks(
-                interaction.guild.id,
-                team=None if caller_team == "all" else caller_team,
-            )
+            if caller_team == "all":
+                all_tasks = get_all_tasks(interaction.guild.id)
+                roster = get_team_members(interaction.guild.id)
+            else:
+                all_tasks = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
+                roster = _get_members_for_vp(interaction.guild.id, caller_team)
+
             pending = _sort_pending(all_tasks)
 
             if not pending:
                 await interaction.response.send_message("✅ No pending tasks right now!")
                 return
 
-            team_rows = get_team_members(
-                interaction.guild.id,
-                team=None if caller_team == "all" else caller_team,
-            )
-            team_ids = {row["user_id"] for row in team_rows}
+            team_ids = {row["user_id"] for row in roster}
             collab_map = get_all_task_collaborators(interaction.guild.id)
 
             team_tasks: dict[str, list[dict]] = {}
@@ -1465,10 +1623,7 @@ class Tasks(commands.Cog):
 
             if member is not None:
                 if caller_team != "all":
-                    team_ids = {
-                        r["user_id"]
-                        for r in get_team_members(interaction.guild.id, team=caller_team)
-                    }
+                    team_ids = _get_team_ids_for_vp(interaction.guild.id, caller_team)
                     if str(member.id) not in team_ids:
                         await interaction.response.send_message(
                             f"❌ {member.mention} is not in your team.",
@@ -1507,10 +1662,11 @@ class Tasks(commands.Cog):
                     )
                 return
 
-            team_rows = get_team_members(
-                interaction.guild.id,
-                team=None if caller_team == "all" else caller_team,
-            )
+            if caller_team == "all":
+                team_rows = get_team_members(interaction.guild.id)
+            else:
+                team_rows = _get_members_for_vp(interaction.guild.id, caller_team)
+
             if not team_rows:
                 await interaction.response.send_message(
                     "⚠️ No team members found. Use /addmember to add members first.",
@@ -1578,7 +1734,7 @@ class Tasks(commands.Cog):
     @app_commands.command(name="addmember", description="Add a member to the team roster.")
     @app_commands.describe(
         member="Member to add",
-        team="Team to add them to (admin only; VP is auto-assigned their team)",
+        team="Team to add them to (required if you are VP of multiple teams)",
     )
     @app_commands.choices(team=TEAM_CHOICES)
     async def addmember(
@@ -1598,10 +1754,23 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            effective_team = (
-                caller_team if caller_team != "all"
-                else (team.value if team is not None else "growth")
-            )
+            if caller_team == "all":
+                effective_team = team.value if team is not None else "growth"
+            elif team is not None:
+                if team.value not in caller_team:
+                    await interaction.response.send_message(
+                        "❌ You can only add members to your own team.", ephemeral=True
+                    )
+                    return
+                effective_team = team.value
+            elif len(caller_team) > 1:
+                await interaction.response.send_message(
+                    "⚠️ You are VP of multiple teams. Please specify a team with the `team:` parameter.",
+                    ephemeral=True,
+                )
+                return
+            else:
+                effective_team = caller_team[0]
 
             if is_team_member(interaction.guild.id, member.id):
                 await interaction.response.send_message(
@@ -1651,10 +1820,7 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team != "all":
-                team_ids = {
-                    r["user_id"]
-                    for r in get_team_members(interaction.guild.id, team=caller_team)
-                }
+                team_ids = _get_team_ids_for_vp(interaction.guild.id, caller_team)
                 if str(member.id) not in team_ids:
                     await interaction.response.send_message(
                         f"⚠️ {member.mention} is not on your team.",
@@ -1685,7 +1851,7 @@ class Tasks(commands.Cog):
             await _send_generic_error(interaction)
 
     @app_commands.command(name="teammembers", description="List team members and their task counts.")
-    @app_commands.describe(team="Optional: filter by team (admin only; VP sees their own team)")
+    @app_commands.describe(team="Optional: filter by team (admin only; VP sees their own team(s))")
     @app_commands.choices(team=TEAM_CHOICES)
     async def teammembers(
         self,
@@ -1703,21 +1869,41 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            effective_team = (
-                caller_team if caller_team != "all"
-                else (team.value if team is not None else None)
-            )
 
-            team_rows = get_team_members(interaction.guild.id, team=effective_team)
+            if caller_team == "all":
+                if team is not None:
+                    team_rows = get_team_members(interaction.guild.id, team=team.value)
+                    all_tasks = get_all_tasks(interaction.guild.id, team=team.value)
+                    team_label = f" — {team.value.capitalize()}"
+                else:
+                    team_rows = get_team_members(interaction.guild.id)
+                    all_tasks = get_all_tasks(interaction.guild.id)
+                    team_label = ""
+            else:
+                if team is not None and team.value not in caller_team:
+                    await interaction.response.send_message(
+                        "❌ You can only view members of your own team.", ephemeral=True
+                    )
+                    return
+                if team is not None:
+                    team_rows = get_team_members(interaction.guild.id, team=team.value)
+                    all_tasks = get_all_tasks(interaction.guild.id, team=team.value)
+                    team_label = f" — {team.value.capitalize()}"
+                else:
+                    team_rows = _get_members_for_vp(interaction.guild.id, caller_team)
+                    all_tasks = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
+                    if len(caller_team) == 1:
+                        team_label = f" — {caller_team[0].capitalize()}"
+                    else:
+                        team_label = f" — {', '.join(t.capitalize() for t in caller_team)}"
+
             if not team_rows:
                 await interaction.response.send_message(
                     "No team members found. Use /addmember to add members.", ephemeral=True
                 )
                 return
 
-            all_tasks = get_all_tasks(interaction.guild.id, team=effective_team)
             today = date.today()
-
             counts: dict[str, dict] = {}
             for t in all_tasks:
                 entry = counts.setdefault(
@@ -1735,7 +1921,6 @@ class Tasks(commands.Cog):
                     ):
                         entry["overdue"] += 1
 
-            team_label = f" — {effective_team.capitalize()}" if effective_team else ""
             lines = [f"👥 Growth Team Members{team_label} ({len(team_rows)} total):", ""]
             for row in team_rows:
                 uid = row["user_id"]
@@ -1791,10 +1976,7 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team != "all":
-                team_ids = {
-                    r["user_id"]
-                    for r in get_team_members(interaction.guild.id, team=caller_team)
-                }
+                team_ids = _get_team_ids_for_vp(interaction.guild.id, caller_team)
                 if str(member.id) not in team_ids:
                     await interaction.response.send_message(
                         f"❌ {member.mention} is not in your team.",
@@ -1836,10 +2018,7 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team != "all":
-                team_ids = {
-                    r["user_id"]
-                    for r in get_team_members(interaction.guild.id, team=caller_team)
-                }
+                team_ids = _get_team_ids_for_vp(interaction.guild.id, caller_team)
                 if str(member.id) not in team_ids:
                     await interaction.response.send_message(
                         f"❌ {member.mention} is not in your team.",
@@ -1849,8 +2028,12 @@ class Tasks(commands.Cog):
                     return
 
             tasks = get_tasks_by_user(interaction.guild.id, member.id)
+            collab_tasks = get_tasks_as_collaborator(interaction.guild.id, member.id)
+            merged: dict[int, dict] = {t["id"]: t for t in tasks}
+            for ct in collab_tasks:
+                merged.setdefault(ct["id"], ct)
             active_tasks = sorted(
-                [t for t in tasks if t["status"] != "done"],
+                [t for t in merged.values() if t["status"] != "done"],
                 key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
             )
 
