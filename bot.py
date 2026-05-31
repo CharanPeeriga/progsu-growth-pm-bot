@@ -24,7 +24,15 @@ intents.members = True
 intents.message_content = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class PMBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        from cogs.views import TaskActionView
+        self.add_view(TaskActionView(0, "0", "", mode="member"))
+        self.add_view(TaskActionView(0, "0", "", mode="review"))
+
+
+bot = PMBot(command_prefix="!", intents=intents)
 
 INITIAL_EXTENSIONS = (
     "cogs.tasks",

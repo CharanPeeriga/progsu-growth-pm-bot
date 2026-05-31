@@ -7,6 +7,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs.views import TaskActionView
+
 from database import (
     CLEAR,
     insert_task,
@@ -398,19 +400,22 @@ class Tasks(commands.Cog):
 
             due_str = _format_due(due_date)
 
+            member_view = TaskActionView(task_id, str(member.id), task, mode="member")
             if collab_ids:
                 collab_mentions = ", ".join(f"<@{uid}>" for uid in collab_ids)
                 await interaction.response.send_message(
                     f"✅ Task #{task_id} assigned to {member.mention}\n"
                     f"📋 {task}\n"
                     f"📅 Due: {due_str}\n"
-                    f"🤝 Collaborators: {collab_mentions}"
+                    f"🤝 Collaborators: {collab_mentions}",
+                    view=member_view,
                 )
             else:
                 await interaction.response.send_message(
                     f"✅ Task #{task_id} assigned to {member.mention}\n"
                     f"📋 {task}\n"
-                    f"📅 Due: {due_str}"
+                    f"📅 Due: {due_str}",
+                    view=member_view,
                 )
 
             # DM primary assignee
@@ -694,8 +699,11 @@ class Tasks(commands.Cog):
                             f"📋 Task submitted for review — growth-pm-bot\n"
                             f"All collaborators completed task #{task_id}: "
                             f"{task['task_name']}\n"
-                            f"Use /approve {task_id} to mark it done or "
-                            f"/reject {task_id} [reason] to send it back."
+                            f"Use the buttons below or /approve {task_id} / "
+                            f"/reject {task_id} [reason].",
+                            view=TaskActionView(
+                                task_id, task["assignee_id"], task["task_name"], mode="review"
+                            ),
                         )
                     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                         pass
@@ -726,8 +734,11 @@ class Tasks(commands.Cog):
                         f"{interaction.user.mention} completed their task and submitted it "
                         f"for review:\n"
                         f"Task #{task_id}: {task['task_name']}\n"
-                        f"Use /approve {task_id} to mark it done or "
-                        f"/reject {task_id} [reason] to send it back."
+                        f"Use the buttons below or /approve {task_id} / "
+                        f"/reject {task_id} [reason].",
+                        view=TaskActionView(
+                            task_id, task["assignee_id"], task["task_name"], mode="review"
+                        ),
                     )
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     pass
