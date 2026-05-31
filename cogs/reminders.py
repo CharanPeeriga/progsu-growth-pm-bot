@@ -31,7 +31,7 @@ class Reminders(commands.Cog):
             guild_id = task["guild_id"]
 
             try:
-                channel_id = get_reminder_channel(guild_id, str(assignee_id))
+                channel_id, _ = get_reminder_channel(guild_id, str(assignee_id))
             except Exception as e:
                 print(f"[reminders] failed to get reminder channel for {assignee_id}: {e}")
                 channel_id = None
@@ -70,7 +70,7 @@ class Reminders(commands.Cog):
             guild_id = task["guild_id"]
 
             try:
-                channel_id = get_reminder_channel(guild_id, str(assignee_id))
+                channel_id, _ = get_reminder_channel(guild_id, str(assignee_id))
             except Exception as e:
                 print(f"[reminders] failed to get reminder channel for {assignee_id}: {e}")
                 channel_id = None

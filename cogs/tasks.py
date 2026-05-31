@@ -1182,7 +1182,7 @@ class Tasks(commands.Cog):
             lines.append("")
             lines.append("Use /done [id] to submit a task for review.")
 
-            channel_id = get_reminder_channel(interaction.guild.id, str(member.id))
+            channel_id, _ = get_reminder_channel(interaction.guild.id, str(member.id))
             if channel_id is not None:
                 try:
                     channel = await self.bot.fetch_channel(int(channel_id))
