@@ -722,3 +722,50 @@ def get_pending_collaborators(task_id):
             return [row[0] for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+def get_tasks_as_collaborator(guild_id, user_id):
+    """Returns tasks where user is a collaborator, including their own submitted status."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT t.id, t.guild_id, t.assignee_id, t.task_name,
+                       t.due_date, t.status, t.created_at, t.rejection_reason,
+                       tc.submitted, tc.submitted_at
+                FROM tasks t
+                JOIN task_collaborators tc ON t.id = tc.task_id AND tc.user_id = %s
+                WHERE t.guild_id = %s
+                ORDER BY t.due_date NULLS LAST, t.created_at
+                """,
+                (str(user_id), str(guild_id)),
+            )
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_all_task_collaborators(guild_id):
+    """Returns {task_id: [{'user_id': ..., 'submitted': bool}]} for all tasks in the guild."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT tc.task_id, tc.user_id, tc.submitted
+                FROM task_collaborators tc
+                JOIN tasks t ON t.id = tc.task_id
+                WHERE t.guild_id = %s
+                ORDER BY tc.task_id, tc.id
+                """,
+                (str(guild_id),),
+            )
+            result: dict = {}
+            for row in cur.fetchall():
+                result.setdefault(row["task_id"], []).append(
+                    {"user_id": row["user_id"], "submitted": row["submitted"]}
+                )
+            return result
+    finally:
+        conn.close()
