@@ -1620,9 +1620,10 @@ class Tasks(commands.Cog):
 
             try:
                 await member.send(
-                    f"👋 You've been added to the growth-pm-bot task system by "
-                    f"{interaction.user.display_name}. You'll receive task assignments "
-                    f"and deadline reminders here. Use /mytasks anytime to see your tasks."
+                    f"👋 You've been added to the progsu Task Management System by "
+                    f"{interaction.user.display_name}.\n\n"
+                    f"You'll receive task assignments and deadline reminders here.\n"
+                    f"Use /mytasks anytime to see your current tasks."
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass
