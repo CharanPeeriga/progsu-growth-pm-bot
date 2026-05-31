@@ -16,6 +16,7 @@ from database import (
     update_task_status,
     delete_task,
     get_tasks_for_progress,
+    get_tasks_for_team,
     set_reminder_channel,
     get_reminder_channel,
     get_tasks_in_review,
@@ -25,6 +26,13 @@ from database import (
     remove_team_member,
     get_team_members,
     is_team_member,
+    set_vp,
+    remove_vp,
+    get_vp,
+    get_team_for_user,
+    is_vp,
+    get_all_vps,
+    set_team_channel,
 )
 
 STATUS_EMOJI = {"todo": "🔵", "in_progress": "🟡", "review": "⏳", "done": "✅"}
@@ -40,6 +48,12 @@ STATUS_CHOICES = [
 TIMEFRAME_CHOICES = [
     app_commands.Choice(name="This Week", value="this_week"),
     app_commands.Choice(name="All Time", value="all_time"),
+]
+
+TEAM_CHOICES = [
+    app_commands.Choice(name="Growth", value="growth"),
+    app_commands.Choice(name="Tech", value="tech"),
+    app_commands.Choice(name="Operations", value="operations"),
 ]
 
 GENERIC_ERROR = (
@@ -90,6 +104,28 @@ async def _send_generic_error(interaction: discord.Interaction) -> None:
         traceback.print_exc()
 
 
+async def get_caller_team(interaction: discord.Interaction) -> Optional[str]:
+    """Returns 'all' for admins, a team string for VPs, or None for regular members."""
+    if interaction.guild is None:
+        return None
+    if interaction.user.guild_permissions.manage_guild:
+        return "all"
+    if is_vp(str(interaction.guild.id), str(interaction.user.id)):
+        return get_team_for_user(str(interaction.guild.id), str(interaction.user.id))
+    return None
+
+
+async def require_admin_or_vp(interaction: discord.Interaction) -> bool:
+    """Sends an error and returns False if the caller is not an admin or VP."""
+    caller_team = await get_caller_team(interaction)
+    if caller_team is None:
+        await interaction.response.send_message(
+            "❌ You don't have permission to use this command.", ephemeral=True
+        )
+        return False
+    return True
+
+
 class Tasks(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -115,6 +151,173 @@ class Tasks(commands.Cog):
         except Exception:
             pass
 
+    # -----------------------------------------------------------------------
+    # VP management
+    # -----------------------------------------------------------------------
+
+    @app_commands.command(name="setvp", description="Set a member as VP of a team.")
+    @app_commands.describe(member="Member to make VP", team="Team they will VP")
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def setvp(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        team: app_commands.Choice[str],
+    ):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "❌ You don't have permission to use this command.", ephemeral=True
+                )
+                return
+
+            set_vp(interaction.guild.id, member.id, team.value, interaction.user.id)
+            await interaction.response.send_message(
+                f"✅ {member.mention} is now VP of **{team.value}** team."
+            )
+
+            try:
+                await member.send(
+                    f"👑 You've been set as VP of the **{team.value}** team in "
+                    f"{interaction.guild.name}.\n"
+                    f"You now have admin-level access for your team's tasks and members."
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+            await self.notify_admin(
+                interaction, "setvp",
+                f"Set {member.mention} as VP of {team.value} team",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="removevp", description="Remove a member's VP role.")
+    @app_commands.describe(member="Member to remove VP from")
+    async def removevp(self, interaction: discord.Interaction, member: discord.Member):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "❌ You don't have permission to use this command.", ephemeral=True
+                )
+                return
+
+            if not get_vp(interaction.guild.id, member.id):
+                await interaction.response.send_message(
+                    f"⚠️ {member.mention} is not a VP.",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
+                return
+
+            remove_vp(interaction.guild.id, member.id)
+            await interaction.response.send_message(
+                f"✅ {member.mention} has been removed as VP."
+            )
+
+            await self.notify_admin(
+                interaction, "removevp",
+                f"Removed {member.mention} as VP",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="listvps", description="List all current VPs.")
+    async def listvps(self, interaction: discord.Interaction):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "❌ You don't have permission to use this command.", ephemeral=True
+                )
+                return
+
+            vps = get_all_vps(interaction.guild.id)
+
+            by_team: dict[str, str] = {}
+            for row in vps:
+                by_team[row["team"]] = f"<@{row['user_id']}>"
+
+            lines = ["👑 VPs:", ""]
+            for team_value in ("growth", "tech", "operations"):
+                mention = by_team.get(team_value, "*(none)*")
+                lines.append(f"**{team_value.capitalize()}:** {mention}")
+
+            await interaction.response.send_message(
+                "\n".join(lines),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    @app_commands.command(name="setteamchannel", description="Set the default reminder channel for a team.")
+    @app_commands.describe(
+        channel="Channel to use as the default reminder channel",
+        team="Team to set the channel for",
+    )
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def setteamchannel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        team: app_commands.Choice[str],
+    ):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all" and caller_team != team.value:
+                await interaction.response.send_message(
+                    "❌ You can only set channels for your own team.", ephemeral=True
+                )
+                return
+
+            set_team_channel(interaction.guild.id, team.value, channel.id)
+            await interaction.response.send_message(
+                f"✅ Default reminder channel for **{team.value}** team set to {channel.mention}.\n"
+                f"Members without a personal channel set will be notified here."
+            )
+
+            await self.notify_admin(
+                interaction, "setteamchannel",
+                f"Set {team.value} team reminder channel to {channel.mention}",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    # -----------------------------------------------------------------------
+    # Task assignment
+    # -----------------------------------------------------------------------
+
     @app_commands.command(name="assign", description="Assign a task to a member.")
     @app_commands.describe(
         member="Member to assign the task to",
@@ -135,11 +338,11 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            if not interaction.user.guild_permissions.manage_guild:
-                await interaction.response.send_message(
-                    "❌ Only admins can assign tasks.", ephemeral=True
-                )
+            if not await require_admin_or_vp(interaction):
                 return
+
+            caller_team = await get_caller_team(interaction)
+            team = caller_team if caller_team != "all" else "growth"
 
             due_date: Optional[date] = None
             if due is not None and due.strip() != "":
@@ -158,6 +361,7 @@ class Tasks(commands.Cog):
                 assigner_id=interaction.user.id,
                 task_name=task,
                 due_date=due_date,
+                team=team,
             )
 
             due_str = _format_due(due_date)
@@ -179,11 +383,15 @@ class Tasks(commands.Cog):
 
             await self.notify_admin(
                 interaction, "assign",
-                f"Assigned task #{task_id} '{task}' to {member.mention}",
+                f"Assigned task #{task_id} '{task}' to {member.mention} [{team} team]",
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
+
+    # -----------------------------------------------------------------------
+    # Member-facing task commands
+    # -----------------------------------------------------------------------
 
     @app_commands.command(name="mytasks", description="List your tasks.")
     async def mytasks(self, interaction: discord.Interaction):
@@ -246,11 +454,16 @@ class Tasks(commands.Cog):
             await _send_generic_error(interaction)
 
     @app_commands.command(name="teamtasks", description="List pending tasks for the team or a member.")
-    @app_commands.describe(member="Optional: a specific member to filter by")
+    @app_commands.describe(
+        member="Optional: filter by specific member",
+        team="Optional: filter by team (visible to all)",
+    )
+    @app_commands.choices(team=TEAM_CHOICES)
     async def teamtasks(
         self,
         interaction: discord.Interaction,
         member: Optional[discord.Member] = None,
+        team: Optional[app_commands.Choice[str]] = None,
     ):
         try:
             if interaction.guild is None:
@@ -259,8 +472,22 @@ class Tasks(commands.Cog):
                 )
                 return
 
+            # Determine effective team filter
+            if team is not None:
+                effective_team = team.value
+            else:
+                caller_team = await get_caller_team(interaction)
+                if caller_team not in (None, "all"):
+                    # VP default: their team
+                    effective_team = caller_team
+                else:
+                    # Admin or regular member with no team param: all teams
+                    effective_team = None
+
             if member is not None:
-                tasks = get_tasks_by_user(interaction.guild.id, member.id)
+                tasks = get_tasks_by_user(
+                    interaction.guild.id, member.id, team=effective_team
+                )
                 pending = _sort_pending(tasks)
 
                 if not pending:
@@ -280,7 +507,7 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            all_tasks = get_all_tasks(interaction.guild.id)
+            all_tasks = get_all_tasks(interaction.guild.id, team=effective_team)
             pending = _sort_pending(all_tasks)
 
             if not pending:
@@ -371,10 +598,9 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="approve", description="Approve a reviewed task and mark it complete.")
+    @app_commands.command(name="inprogress", description="Mark a task as in progress.")
     @app_commands.describe(task_id="The task ID")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def approve(self, interaction: discord.Interaction, task_id: int):
+    async def inprogress(self, interaction: discord.Interaction, task_id: int):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -388,6 +614,67 @@ class Tasks(commands.Cog):
                     f"❌ Task #{task_id} not found.", ephemeral=True
                 )
                 return
+
+            if str(interaction.user.id) != task["assignee_id"]:
+                await interaction.response.send_message(
+                    "❌ You can only update your own tasks.", ephemeral=True
+                )
+                return
+
+            if task["status"] == "in_progress":
+                await interaction.response.send_message(
+                    f"⚠️ Task #{task_id} is already in progress.", ephemeral=True
+                )
+                return
+
+            update_task_status(task_id, "in_progress")
+            await interaction.response.send_message(
+                f"🟡 {interaction.user.mention} is now working on task #{task_id}: {task['task_name']}"
+            )
+
+            await self.notify_admin(
+                interaction, "inprogress",
+                f"{interaction.user.mention} started working on task #{task_id}: {task['task_name']}",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    # -----------------------------------------------------------------------
+    # Review / approval
+    # -----------------------------------------------------------------------
+
+    @app_commands.command(name="approve", description="Approve a reviewed task and mark it complete.")
+    @app_commands.describe(task_id="The task ID")
+    async def approve(self, interaction: discord.Interaction, task_id: int):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not await require_admin_or_vp(interaction):
+                return
+
+            task = get_task_by_id(task_id, interaction.guild.id)
+            if task is None:
+                await interaction.response.send_message(
+                    f"❌ Task #{task_id} not found.", ephemeral=True
+                )
+                return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                team_ids = {
+                    r["user_id"]
+                    for r in get_team_members(interaction.guild.id, team=caller_team)
+                }
+                if task["assignee_id"] not in team_ids:
+                    await interaction.response.send_message(
+                        f"❌ Task #{task_id} is not in your team.", ephemeral=True
+                    )
+                    return
 
             if task["status"] != "review":
                 await interaction.response.send_message(
@@ -425,7 +712,6 @@ class Tasks(commands.Cog):
 
     @app_commands.command(name="reject", description="Send a task back to the assignee with feedback.")
     @app_commands.describe(task_id="The task ID", reason="Feedback for the member")
-    @app_commands.checks.has_permissions(manage_guild=True)
     async def reject(
         self,
         interaction: discord.Interaction,
@@ -439,12 +725,27 @@ class Tasks(commands.Cog):
                 )
                 return
 
+            if not await require_admin_or_vp(interaction):
+                return
+
             task = get_task_by_id(task_id, interaction.guild.id)
             if task is None:
                 await interaction.response.send_message(
                     f"❌ Task #{task_id} not found.", ephemeral=True
                 )
                 return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                team_ids = {
+                    r["user_id"]
+                    for r in get_team_members(interaction.guild.id, team=caller_team)
+                }
+                if task["assignee_id"] not in team_ids:
+                    await interaction.response.send_message(
+                        f"❌ Task #{task_id} is not in your team.", ephemeral=True
+                    )
+                    return
 
             if task["status"] != "review":
                 await interaction.response.send_message(
@@ -480,8 +781,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="reviewqueue", description="See all tasks waiting for admin review.")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.command(name="reviewqueue", description="See all tasks waiting for review.")
     async def reviewqueue(self, interaction: discord.Interaction):
         try:
             if interaction.guild is None:
@@ -490,7 +790,17 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            tasks = get_tasks_in_review(interaction.guild.id)
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                all_team = get_all_tasks(interaction.guild.id, team=caller_team)
+                tasks = [t for t in all_team if t["status"] == "review"]
+                tasks.sort(key=lambda t: t["created_at"])
+            else:
+                tasks = get_tasks_in_review(interaction.guild.id)
+
             if not tasks:
                 await interaction.response.send_message(
                     "✅ No tasks waiting for review.", ephemeral=True
@@ -513,6 +823,10 @@ class Tasks(commands.Cog):
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
+
+    # -----------------------------------------------------------------------
+    # Task editing
+    # -----------------------------------------------------------------------
 
     @app_commands.command(name="settaskstatus", description="Set the status of a task.")
     @app_commands.describe(task_id="The task ID", status="New status")
@@ -639,7 +953,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="deletetask", description="Delete a task (Manage Server only).")
+    @app_commands.command(name="deletetask", description="Delete a task.")
     @app_commands.describe(task_id="The task ID")
     async def deletetask(self, interaction: discord.Interaction, task_id: int):
         try:
@@ -649,10 +963,7 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            if not interaction.user.guild_permissions.manage_guild:
-                await interaction.response.send_message(
-                    "❌ You don't have permission to delete tasks.", ephemeral=True
-                )
+            if not await require_admin_or_vp(interaction):
                 return
 
             task = get_task_by_id(task_id, interaction.guild.id)
@@ -661,6 +972,18 @@ class Tasks(commands.Cog):
                     f"❌ Task #{task_id} not found.", ephemeral=True
                 )
                 return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                team_ids = {
+                    r["user_id"]
+                    for r in get_team_members(interaction.guild.id, team=caller_team)
+                }
+                if task["assignee_id"] not in team_ids:
+                    await interaction.response.send_message(
+                        f"❌ Task #{task_id} is not in your team.", ephemeral=True
+                    )
+                    return
 
             delete_task(task_id)
             await interaction.response.send_message(
@@ -675,8 +998,11 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="alltasks", description="List every task in the server, grouped by member.")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    # -----------------------------------------------------------------------
+    # Admin / VP task views
+    # -----------------------------------------------------------------------
+
+    @app_commands.command(name="alltasks", description="List every task, grouped by member.")
     async def alltasks(self, interaction: discord.Interaction):
         try:
             if interaction.guild is None:
@@ -685,7 +1011,15 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            tasks = get_all_tasks(interaction.guild.id)
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+            tasks = get_all_tasks(
+                interaction.guild.id,
+                team=None if caller_team == "all" else caller_team,
+            )
+
             if not tasks:
                 await interaction.response.send_message(
                     "No tasks found.", ephemeral=True
@@ -706,7 +1040,6 @@ class Tasks(commands.Cog):
                         t["due_date"] or date.max,
                     ),
                 )
-
                 lines.append(f"**<@{assignee_id}>**")
                 for t in sorted_items:
                     lines.append(_task_line(t))
@@ -739,14 +1072,17 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="progress", description="Team progress snapshot for the weekly meeting.")
-    @app_commands.describe(timeframe="Reporting window (defaults to This Week)")
-    @app_commands.choices(timeframe=TIMEFRAME_CHOICES)
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.command(name="progress", description="Team progress snapshot.")
+    @app_commands.describe(
+        timeframe="Reporting window (defaults to This Week)",
+        team="Optional: filter by team (admin only)",
+    )
+    @app_commands.choices(timeframe=TIMEFRAME_CHOICES, team=TEAM_CHOICES)
     async def progress(
         self,
         interaction: discord.Interaction,
         timeframe: Optional[app_commands.Choice[str]] = None,
+        team: Optional[app_commands.Choice[str]] = None,
     ):
         try:
             if interaction.guild is None:
@@ -755,15 +1091,36 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            window = timeframe.value if timeframe is not None else "this_week"
-            if window == "this_week":
-                since_date = date.today() - timedelta(days=7)
-                tasks = get_tasks_for_progress(interaction.guild.id, since_date=since_date)
-                window_label = "This Week"
-            else:
-                tasks = get_tasks_for_progress(interaction.guild.id)
-                window_label = "All Time"
+            if not await require_admin_or_vp(interaction):
+                return
 
+            caller_team = await get_caller_team(interaction)
+            window = timeframe.value if timeframe is not None else "this_week"
+            window_label = "This Week" if window == "this_week" else "All Time"
+            since_date = date.today() - timedelta(days=7) if window == "this_week" else None
+
+            # VP auto-scopes; admin uses the optional team param
+            if caller_team != "all":
+                effective_team = caller_team
+            else:
+                effective_team = team.value if team is not None else None
+
+            if effective_team is not None:
+                all_team_tasks = get_tasks_for_team(interaction.guild.id, effective_team)
+                if since_date is not None:
+                    tasks = [
+                        t for t in all_team_tasks
+                        if t["created_at"].date() >= since_date
+                    ]
+                else:
+                    tasks = all_team_tasks
+            else:
+                tasks = get_tasks_for_progress(
+                    interaction.guild.id,
+                    since_date=since_date,
+                )
+
+            team_label = f" — {effective_team.capitalize()} Team" if effective_team else ""
             today = date.today()
 
             total = len(tasks)
@@ -833,17 +1190,16 @@ class Tasks(commands.Cog):
             )[:5]
 
             if upcoming:
-                upcoming_lines = []
-                for t in upcoming:
-                    upcoming_lines.append(
-                        f"📅 {t['due_date'].isoformat()} — {t['task_name']} (<@{t['assignee_id']}>)"
-                    )
+                upcoming_lines = [
+                    f"📅 {t['due_date'].isoformat()} — {t['task_name']} (<@{t['assignee_id']}>)"
+                    for t in upcoming
+                ]
                 upcoming_text = "\n".join(upcoming_lines)
             else:
                 upcoming_text = "No upcoming deadlines."
 
             embed = discord.Embed(
-                title="📊 Growth Team Progress Report",
+                title=f"📊 Growth Team Progress Report{team_label}",
                 color=0x5865F2,
             )
             embed.add_field(name="Team Overview", value=overview, inline=False)
@@ -862,8 +1218,7 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="pingteam", description="Ping @Growth with all current pending tasks.")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.command(name="pingteam", description="Post all current pending tasks publicly.")
     async def pingteam(self, interaction: discord.Interaction):
         try:
             if interaction.guild is None:
@@ -872,7 +1227,14 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            all_tasks = get_all_tasks(interaction.guild.id)
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+            all_tasks = get_all_tasks(
+                interaction.guild.id,
+                team=None if caller_team == "all" else caller_team,
+            )
             pending = _sort_pending(all_tasks)
 
             if not pending:
@@ -881,7 +1243,10 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            team_rows = get_team_members(interaction.guild.id)
+            team_rows = get_team_members(
+                interaction.guild.id,
+                team=None if caller_team == "all" else caller_team,
+            )
             team_ids = {row["user_id"] for row in team_rows}
 
             team_tasks: dict[str, list[dict]] = {}
@@ -905,7 +1270,7 @@ class Tasks(commands.Cog):
             body = "\n\n".join(sections) if sections else "No pending tasks for team members."
             message = f"{ping_prefix}here are all current pending tasks:\n\n{body}"
 
-            if other_tasks:
+            if other_tasks and caller_team == "all":
                 other_sections: list[str] = []
                 for assignee_id, items in other_tasks.items():
                     section = [f"<@{assignee_id}>"]
@@ -933,7 +1298,6 @@ class Tasks(commands.Cog):
 
     @app_commands.command(name="dmtasks", description="DM team member(s) their pending tasks.")
     @app_commands.describe(member="Optional: DM only this member")
-    @app_commands.checks.has_permissions(manage_guild=True)
     async def dmtasks(
         self,
         interaction: discord.Interaction,
@@ -946,7 +1310,26 @@ class Tasks(commands.Cog):
                 )
                 return
 
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+
             if member is not None:
+                # VP can only DM their own team members
+                if caller_team != "all":
+                    team_ids = {
+                        r["user_id"]
+                        for r in get_team_members(interaction.guild.id, team=caller_team)
+                    }
+                    if str(member.id) not in team_ids:
+                        await interaction.response.send_message(
+                            f"❌ {member.mention} is not in your team.",
+                            ephemeral=True,
+                            allowed_mentions=discord.AllowedMentions(users=False),
+                        )
+                        return
+
                 tasks = get_tasks_by_user(interaction.guild.id, member.id)
                 pending = [t for t in tasks if t["status"] not in ("done",)]
 
@@ -978,8 +1361,11 @@ class Tasks(commands.Cog):
                     )
                 return
 
-            # No-member mode: only DM registered team members
-            team_rows = get_team_members(interaction.guild.id)
+            # No-member mode: DM registered team members, scoped by caller's team
+            team_rows = get_team_members(
+                interaction.guild.id,
+                team=None if caller_team == "all" else caller_team,
+            )
             if not team_rows:
                 await interaction.response.send_message(
                     "⚠️ No team members found. Use /addmember to add members first.",
@@ -1041,16 +1427,37 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="addmember", description="Add a member to the Growth team.")
-    @app_commands.describe(member="Member to add to the Growth team")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def addmember(self, interaction: discord.Interaction, member: discord.Member):
+    # -----------------------------------------------------------------------
+    # Team roster management
+    # -----------------------------------------------------------------------
+
+    @app_commands.command(name="addmember", description="Add a member to the team roster.")
+    @app_commands.describe(
+        member="Member to add",
+        team="Team to add them to (admin only; VP is auto-assigned their team)",
+    )
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def addmember(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        team: Optional[app_commands.Choice[str]] = None,
+    ):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
                     "This command must be used in a server.", ephemeral=True
                 )
                 return
+
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                effective_team = caller_team
+            else:
+                effective_team = team.value if team is not None else "growth"
 
             if is_team_member(interaction.guild.id, member.id):
                 await interaction.response.send_message(
@@ -1060,9 +1467,11 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            add_team_member(interaction.guild.id, member.id, member.display_name)
+            add_team_member(
+                interaction.guild.id, member.id, member.display_name, team=effective_team
+            )
             await interaction.response.send_message(
-                f"✅ {member.mention} has been added to the growth team!"
+                f"✅ {member.mention} has been added to the **{effective_team}** team!"
             )
 
             try:
@@ -1076,15 +1485,14 @@ class Tasks(commands.Cog):
 
             await self.notify_admin(
                 interaction, "addmember",
-                f"Added {member.mention} to the Growth team",
+                f"Added {member.mention} to the {effective_team} team",
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="removemember", description="Remove a member from the Growth team.")
-    @app_commands.describe(member="Member to remove from the Growth team")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.command(name="removemember", description="Remove a member from the team roster.")
+    @app_commands.describe(member="Member to remove")
     async def removemember(self, interaction: discord.Interaction, member: discord.Member):
         try:
             if interaction.guild is None:
@@ -1092,6 +1500,23 @@ class Tasks(commands.Cog):
                     "This command must be used in a server.", ephemeral=True
                 )
                 return
+
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                team_ids = {
+                    r["user_id"]
+                    for r in get_team_members(interaction.guild.id, team=caller_team)
+                }
+                if str(member.id) not in team_ids:
+                    await interaction.response.send_message(
+                        f"⚠️ {member.mention} is not on your team.",
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions(users=False),
+                    )
+                    return
 
             if not is_team_member(interaction.guild.id, member.id):
                 await interaction.response.send_message(
@@ -1114,17 +1539,13 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="setchannel", description="Set the reminder channel for a member.")
-    @app_commands.describe(
-        member="Member to configure reminders for",
-        channel="Channel to post reminders in",
-    )
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def setchannel(
+    @app_commands.command(name="teammembers", description="List team members and their task counts.")
+    @app_commands.describe(team="Optional: filter by team (admin only; VP sees their own team)")
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def teammembers(
         self,
         interaction: discord.Interaction,
-        member: discord.Member,
-        channel: discord.TextChannel,
+        team: Optional[app_commands.Choice[str]] = None,
     ):
         try:
             if interaction.guild is None:
@@ -1133,110 +1554,23 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            set_reminder_channel(interaction.guild.id, member.id, channel.id)
-            await interaction.response.send_message(
-                f"✅ Reminders for {member.mention} will be sent to {channel.mention}.",
-                ephemeral=True,
-            )
-
-            await self.notify_admin(
-                interaction, "setchannel",
-                f"Set {member.mention}'s reminders to {channel.mention}",
-            )
-        except Exception:
-            traceback.print_exc()
-            await _send_generic_error(interaction)
-
-    @app_commands.command(name="remind", description="Remind a member of their pending tasks.")
-    @app_commands.describe(member="Member to remind")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def remind(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member,
-    ):
-        try:
-            if interaction.guild is None:
-                await interaction.response.send_message(
-                    "This command must be used in a server.", ephemeral=True
-                )
+            if not await require_admin_or_vp(interaction):
                 return
 
-            tasks = get_tasks_by_user(interaction.guild.id, member.id)
-            active_tasks = sorted(
-                [t for t in tasks if t["status"] != "done"],
-                key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
-            )
-
-            if not active_tasks:
-                await interaction.response.send_message(
-                    f"⚠️ {member.mention} has no pending tasks.",
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions(users=False),
-                )
-                return
-
-            lines = [f"📋 {member.mention} — here are your current pending tasks:", ""]
-            for t in active_tasks:
-                lines.append(_task_line(t))
-            lines.append("")
-            lines.append("Use /done [id] to submit a task for review.")
-
-            channel_id, _ = get_reminder_channel(interaction.guild.id, str(member.id))
-            if channel_id is not None:
-                try:
-                    channel = await self.bot.fetch_channel(int(channel_id))
-                    await channel.send(
-                        "\n".join(lines),
-                        allowed_mentions=discord.AllowedMentions(users=True),
-                    )
-                    await interaction.response.send_message(
-                        f"✅ Posted reminder for {member.mention} in {channel.mention}.",
-                        ephemeral=True,
-                        allowed_mentions=discord.AllowedMentions(users=False),
-                    )
-                except Exception:
-                    await interaction.response.send_message(
-                        "❌ Could not post in the configured reminder channel.",
-                        ephemeral=True,
-                    )
-                    return
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                effective_team = caller_team
             else:
-                lines.append(
-                    "\n*(No reminder channel set — use /setchannel to assign one)*"
-                )
-                await interaction.response.send_message(
-                    "\n".join(lines),
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions(users=False),
-                )
+                effective_team = team.value if team is not None else None
 
-            await self.notify_admin(
-                interaction, "remind",
-                f"Sent task reminder to {member.mention} ({len(active_tasks)} active task(s))",
-            )
-        except Exception:
-            traceback.print_exc()
-            await _send_generic_error(interaction)
-
-    @app_commands.command(name="teammembers", description="List all Growth team members and their task counts.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def teammembers(self, interaction: discord.Interaction):
-        try:
-            if interaction.guild is None:
-                await interaction.response.send_message(
-                    "This command must be used in a server.", ephemeral=True
-                )
-                return
-
-            team_rows = get_team_members(interaction.guild.id)
+            team_rows = get_team_members(interaction.guild.id, team=effective_team)
             if not team_rows:
                 await interaction.response.send_message(
                     "No team members found. Use /addmember to add members.", ephemeral=True
                 )
                 return
 
-            all_tasks = get_all_tasks(interaction.guild.id)
+            all_tasks = get_all_tasks(interaction.guild.id, team=effective_team)
             today = date.today()
 
             counts: dict[str, dict] = {}
@@ -1256,7 +1590,8 @@ class Tasks(commands.Cog):
                     ):
                         entry["overdue"] += 1
 
-            lines = [f"👥 Growth Team Members ({len(team_rows)} total):", ""]
+            team_label = f" — {effective_team.capitalize()}" if effective_team else ""
+            lines = [f"👥 Growth Team Members{team_label} ({len(team_rows)} total):", ""]
             for row in team_rows:
                 uid = row["user_id"]
                 try:
@@ -1284,9 +1619,21 @@ class Tasks(commands.Cog):
             traceback.print_exc()
             await _send_generic_error(interaction)
 
-    @app_commands.command(name="inprogress", description="Mark a task as in progress.")
-    @app_commands.describe(task_id="The task ID")
-    async def inprogress(self, interaction: discord.Interaction, task_id: int):
+    # -----------------------------------------------------------------------
+    # Reminders
+    # -----------------------------------------------------------------------
+
+    @app_commands.command(name="setchannel", description="Set the reminder channel for a member.")
+    @app_commands.describe(
+        member="Member to configure reminders for",
+        channel="Channel to post reminders in",
+    )
+    async def setchannel(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        channel: discord.TextChannel,
+    ):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -1294,37 +1641,128 @@ class Tasks(commands.Cog):
                 )
                 return
 
-            task = get_task_by_id(task_id, interaction.guild.id)
-            if task is None:
-                await interaction.response.send_message(
-                    f"❌ Task #{task_id} not found.", ephemeral=True
-                )
+            if not await require_admin_or_vp(interaction):
                 return
 
-            if str(interaction.user.id) != task["assignee_id"]:
-                await interaction.response.send_message(
-                    "❌ You can only update your own tasks.", ephemeral=True
-                )
-                return
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                team_ids = {
+                    r["user_id"]
+                    for r in get_team_members(interaction.guild.id, team=caller_team)
+                }
+                if str(member.id) not in team_ids:
+                    await interaction.response.send_message(
+                        f"❌ {member.mention} is not in your team.",
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions(users=False),
+                    )
+                    return
 
-            if task["status"] == "in_progress":
-                await interaction.response.send_message(
-                    f"⚠️ Task #{task_id} is already in progress.", ephemeral=True
-                )
-                return
-
-            update_task_status(task_id, "in_progress")
+            set_reminder_channel(interaction.guild.id, member.id, channel.id)
             await interaction.response.send_message(
-                f"🟡 {interaction.user.mention} is now working on task #{task_id}: {task['task_name']}"
+                f"✅ Reminders for {member.mention} will be sent to {channel.mention}.",
+                ephemeral=True,
             )
 
             await self.notify_admin(
-                interaction, "inprogress",
-                f"{interaction.user.mention} started working on task #{task_id}: {task['task_name']}",
+                interaction, "setchannel",
+                f"Set {member.mention}'s reminders to {channel.mention}",
             )
         except Exception:
             traceback.print_exc()
             await _send_generic_error(interaction)
+
+    @app_commands.command(name="remind", description="Remind a member of their pending tasks.")
+    @app_commands.describe(member="Member to remind")
+    async def remind(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ):
+        try:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "This command must be used in a server.", ephemeral=True
+                )
+                return
+
+            if not await require_admin_or_vp(interaction):
+                return
+
+            caller_team = await get_caller_team(interaction)
+            if caller_team != "all":
+                team_ids = {
+                    r["user_id"]
+                    for r in get_team_members(interaction.guild.id, team=caller_team)
+                }
+                if str(member.id) not in team_ids:
+                    await interaction.response.send_message(
+                        f"❌ {member.mention} is not in your team.",
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions(users=False),
+                    )
+                    return
+
+            tasks = get_tasks_by_user(interaction.guild.id, member.id)
+            active_tasks = sorted(
+                [t for t in tasks if t["status"] != "done"],
+                key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
+            )
+
+            if not active_tasks:
+                await interaction.response.send_message(
+                    f"⚠️ {member.mention} has no pending tasks.",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
+                return
+
+            lines = [f"📋 {member.mention} — here are your current pending tasks:", ""]
+            for t in active_tasks:
+                lines.append(_task_line(t))
+            lines.append("")
+            lines.append("Use /done [id] to submit a task for review.")
+
+            channel_id, _ = get_reminder_channel(interaction.guild.id, str(member.id))
+            if channel_id is not None:
+                try:
+                    ch = await self.bot.fetch_channel(int(channel_id))
+                    await ch.send(
+                        "\n".join(lines),
+                        allowed_mentions=discord.AllowedMentions(users=True),
+                    )
+                    await interaction.response.send_message(
+                        f"✅ Posted reminder for {member.mention} in {ch.mention}.",
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions(users=False),
+                    )
+                except Exception:
+                    await interaction.response.send_message(
+                        "❌ Could not post in the configured reminder channel.",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                lines.append(
+                    "\n*(No reminder channel set — use /setchannel to assign one)*"
+                )
+                await interaction.response.send_message(
+                    "\n".join(lines),
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
+
+            await self.notify_admin(
+                interaction, "remind",
+                f"Sent task reminder to {member.mention} ({len(active_tasks)} active task(s))",
+            )
+        except Exception:
+            traceback.print_exc()
+            await _send_generic_error(interaction)
+
+    # -----------------------------------------------------------------------
+    # Utilities
+    # -----------------------------------------------------------------------
 
     @app_commands.command(name="ping", description="Check if the bot is online.")
     async def ping(self, interaction: discord.Interaction):
