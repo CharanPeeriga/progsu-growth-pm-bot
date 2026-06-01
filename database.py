@@ -772,6 +772,42 @@ def get_pending_collaborators(task_id):
         conn.close()
 
 
+def get_tasks_as_collaborator_for_user(guild_id, user_id, team=None):
+    """Returns tasks where user is a collaborator, filtered to pending (non-done) statuses, with optional team filter."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if team is not None:
+                cur.execute(
+                    """
+                    SELECT t.id, t.guild_id, t.assignee_id, t.assigner_id,
+                           t.task_name, t.due_date, t.status, t.created_at,
+                           t.rejection_reason, t.team
+                    FROM tasks t
+                    JOIN task_collaborators tc ON tc.task_id = t.id
+                    WHERE tc.user_id = %s AND t.guild_id = %s AND t.team = %s
+                    ORDER BY t.due_date NULLS LAST, t.created_at
+                    """,
+                    (str(user_id), str(guild_id), team),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT t.id, t.guild_id, t.assignee_id, t.assigner_id,
+                           t.task_name, t.due_date, t.status, t.created_at,
+                           t.rejection_reason, t.team
+                    FROM tasks t
+                    JOIN task_collaborators tc ON tc.task_id = t.id
+                    WHERE tc.user_id = %s AND t.guild_id = %s
+                    ORDER BY t.due_date NULLS LAST, t.created_at
+                    """,
+                    (str(user_id), str(guild_id)),
+                )
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def get_tasks_as_collaborator(guild_id, user_id):
     """Returns tasks where user is a collaborator, including their own submitted status."""
     conn = get_connection()

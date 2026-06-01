@@ -25,11 +25,13 @@ class RejectModal(Modal, title="Reject Task"):
         try:
             assignee = await interaction.client.fetch_user(int(self.assignee_id))
             await assignee.send(
-                f"↩️ Task sent back — growth-pm-bot\n"
+                f"↩️ Task sent back — progsu pm bot\n"
                 f"Your task has been reviewed and needs more work:\n"
                 f"Task #{self.task_id}: {self.task_name}\n"
                 f"Feedback: {self.reason.value}\n"
-                f"Update your work and resubmit with /done {self.task_id} when ready."
+                f"Please update your work and set a new due date if needed:\n"
+                f"→ Update due date: /edittask {self.task_id} due:YYYY-MM-DD\n"
+                f"→ Resubmit when ready: /done {self.task_id}"
             )
         except Exception:
             pass
@@ -39,10 +41,12 @@ class RejectModal(Modal, title="Reject Task"):
             try:
                 cu = await interaction.client.fetch_user(int(c["user_id"]))
                 await cu.send(
-                    f"↩️ Task sent back — growth-pm-bot\n"
+                    f"↩️ Task sent back — progsu pm bot\n"
                     f"Task #{self.task_id}: {self.task_name}\n"
                     f"Feedback: {self.reason.value}\n"
-                    f"Use /done {self.task_id} to resubmit when ready."
+                    f"Please update your work and set a new due date if needed:\n"
+                    f"→ Update due date: /edittask {self.task_id} due:YYYY-MM-DD\n"
+                    f"→ Resubmit when ready: /done {self.task_id}"
                 )
             except Exception:
                 pass
@@ -141,7 +145,7 @@ class SubmitForReviewButton(Button):
         try:
             owner = await interaction.client.fetch_user(interaction.guild.owner_id)
             await owner.send(
-                f"📋 Task submitted for review — growth-pm-bot\n"
+                f"📋 Task submitted for review — progsu pm bot\n"
                 f"{interaction.user.mention} submitted task "
                 f"#{self.task_id}: {task['task_name']}\n"
                 f"Use the buttons below to approve or reject.",
@@ -182,7 +186,7 @@ class ApproveButton(Button):
         try:
             assignee = await interaction.client.fetch_user(int(self.assignee_id))
             await assignee.send(
-                f"✅ Task approved — growth-pm-bot\n"
+                f"✅ Task approved — progsu pm bot\n"
                 f"Your task has been reviewed and approved!\n"
                 f"Task #{self.task_id}: {self.task_name}\n"
                 f"Great work!"
@@ -195,7 +199,7 @@ class ApproveButton(Button):
             try:
                 cu = await interaction.client.fetch_user(int(c["user_id"]))
                 await cu.send(
-                    f"✅ Task approved — growth-pm-bot\n"
+                    f"✅ Task approved — progsu pm bot\n"
                     f"Task #{self.task_id}: {self.task_name} was approved.\n"
                     f"Great work!"
                 )

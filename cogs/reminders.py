@@ -1,3 +1,6 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import discord
 from discord.ext import commands, tasks
 
@@ -7,6 +10,8 @@ from database import (
     mark_reminded_day_of,
     get_reminder_channel,
 )
+
+EST = ZoneInfo("America/New_York")
 
 
 class Reminders(commands.Cog):
@@ -19,6 +24,13 @@ class Reminders(commands.Cog):
 
     @tasks.loop(hours=1)
     async def reminder_loop(self):
+        now_est = datetime.now(EST)
+        if now_est.hour != 9:
+            print(
+                f"🔔 Reminder check skipped — not 9 AM EST "
+                f"(current: {now_est.hour}:00 EST)"
+            )
+            return
         try:
             two_day_tasks, day_of_tasks = get_unreminded_due_tasks()
         except Exception as e:
@@ -37,7 +49,7 @@ class Reminders(commands.Cog):
                 channel_id = None
 
             message = (
-                "⏰ Heads up — growth-pm-bot\n"
+                "⏰ Heads up — progsu pm bot\n"
                 "You have a task due in 2 days:\n"
                 f"#{task['id']}: {task['task_name']}\n"
                 f"Due: {task['due_date'].isoformat()}\n"
@@ -76,7 +88,7 @@ class Reminders(commands.Cog):
                 channel_id = None
 
             message = (
-                "🚨 Due today — growth-pm-bot\n"
+                "🚨 Due today — progsu pm bot\n"
                 "This task is due TODAY:\n"
                 f"#{task['id']}: {task['task_name']}\n"
                 f"Due: {task['due_date'].isoformat()}\n"

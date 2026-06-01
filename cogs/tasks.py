@@ -37,12 +37,14 @@ from database import (
     get_all_vps,
     get_member_team,
     set_team_channel,
+    get_team_channel,
     add_collaborator,
     get_collaborators,
     submit_collaborator,
     all_collaborators_submitted,
     get_pending_collaborators,
     get_tasks_as_collaborator,
+    get_tasks_as_collaborator_for_user,
     get_all_task_collaborators,
 )
 
@@ -67,6 +69,8 @@ TEAM_CHOICES = [
     app_commands.Choice(name="Operations", value="operations"),
     app_commands.Choice(name="Progirls", value="progirls"),
 ]
+
+TEAMS = ("growth", "tech", "operations", "progirls")
 
 GENERIC_ERROR = (
     "⚠️ Something went wrong. Please try again or contact your server admin."
@@ -111,7 +115,7 @@ def _build_dm_lines(tasks: list[dict]) -> list[str]:
         tasks,
         key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
     )
-    lines = ["📋 growth-pm-bot — Your current tasks:", ""]
+    lines = ["📋 progsu pm bot — Your current tasks:", ""]
     for t in sorted_items:
         lines.append(_task_line(t))
     lines.append("")
@@ -212,7 +216,7 @@ class Tasks(commands.Cog):
         try:
             owner = await self.bot.fetch_user(interaction.guild.owner_id)
             await owner.send(
-                f"📋 Command used — growth-pm-bot\n"
+                f"📋 Command used — progsu pm bot\n"
                 f"Command: /{command_name}\n"
                 f"Used by: {interaction.user.mention} ({interaction.user.name})\n"
                 f"Server: {interaction.guild.name}\n"
@@ -696,18 +700,30 @@ class Tasks(commands.Cog):
 
             if member is not None:
                 if use_vp_multi:
-                    all_member_tasks = []
+                    assigned_list: list[dict] = []
+                    collab_list: list[dict] = []
                     for t in caller_team:
-                        all_member_tasks.extend(
+                        assigned_list.extend(
                             get_tasks_by_user(interaction.guild.id, member.id, team=t)
                         )
-                    seen: dict[int, dict] = {t["id"]: t for t in all_member_tasks}
-                    tasks = list(seen.values())
+                        collab_list.extend(
+                            get_tasks_as_collaborator_for_user(
+                                interaction.guild.id, member.id, team=t
+                            )
+                        )
                 else:
-                    tasks = get_tasks_by_user(
+                    assigned_list = get_tasks_by_user(
                         interaction.guild.id, member.id, team=effective_team
                     )
-                pending = _sort_pending(tasks)
+                    collab_list = get_tasks_as_collaborator_for_user(
+                        interaction.guild.id, member.id, team=effective_team
+                    )
+
+                seen_assigned: dict[int, dict] = {t["id"]: t for t in assigned_list}
+                seen_collab: dict[int, dict] = {t["id"]: t for t in collab_list}
+                collab_only_ids: set[int] = set(seen_collab) - set(seen_assigned)
+                merged: dict[int, dict] = {**seen_collab, **seen_assigned}
+                pending = _sort_pending(merged.values())
 
                 if not pending:
                     await interaction.response.send_message(
@@ -717,7 +733,8 @@ class Tasks(commands.Cog):
 
                 lines = [f"📋 Pending tasks for {member.mention}:"]
                 for t in pending:
-                    lines.append(_task_block(t, collab_map.get(t["id"])))
+                    prefix = "🤝 " if t["id"] in collab_only_ids else ""
+                    lines.append(prefix + _task_block(t, collab_map.get(t["id"])))
 
                 await interaction.response.send_message(
                     "\n".join(lines),
@@ -822,7 +839,7 @@ class Tasks(commands.Cog):
                     try:
                         owner = await self.bot.fetch_user(interaction.guild.owner_id)
                         await owner.send(
-                            f"📋 Task submitted for review — growth-pm-bot\n"
+                            f"📋 Task submitted for review — progsu pm bot\n"
                             f"All collaborators completed task #{task_id}: "
                             f"{task['task_name']}\n"
                             f"Use the buttons below or /approve {task_id} / "
@@ -855,7 +872,7 @@ class Tasks(commands.Cog):
                 try:
                     owner = await self.bot.fetch_user(interaction.guild.owner_id)
                     await owner.send(
-                        f"📋 Task submitted for review — growth-pm-bot\n"
+                        f"📋 Task submitted for review — progsu pm bot\n"
                         f"{interaction.user.mention} completed their task and submitted it "
                         f"for review:\n"
                         f"Task #{task_id}: {task['task_name']}\n"
@@ -972,7 +989,7 @@ class Tasks(commands.Cog):
             try:
                 assignee = await self.bot.fetch_user(int(task["assignee_id"]))
                 await assignee.send(
-                    f"✅ Task approved — growth-pm-bot\n"
+                    f"✅ Task approved — progsu pm bot\n"
                     f"Your task has been reviewed and approved!\n"
                     f"Task #{task_id}: {task['task_name']}\n"
                     f"Great work!"
@@ -986,7 +1003,7 @@ class Tasks(commands.Cog):
                 try:
                     cu = await self.bot.fetch_user(int(c["user_id"]))
                     await cu.send(
-                        f"✅ Task approved — growth-pm-bot\n"
+                        f"✅ Task approved — progsu pm bot\n"
                         f"Task #{task_id}: {task['task_name']} was approved.\n"
                         f"Great work!"
                     )
@@ -1053,11 +1070,13 @@ class Tasks(commands.Cog):
             try:
                 assignee = await self.bot.fetch_user(int(task["assignee_id"]))
                 await assignee.send(
-                    f"↩️ Task sent back — growth-pm-bot\n"
+                    f"↩️ Task sent back — progsu pm bot\n"
                     f"Your task has been reviewed and needs more work:\n"
                     f"Task #{task_id}: {task['task_name']}\n"
                     f"Feedback: {reason}\n"
-                    f"Update your work and resubmit with /done {task_id} when ready."
+                    f"Please update your work and set a new due date if needed:\n"
+                    f"→ Update due date: /edittask {task_id} due:YYYY-MM-DD\n"
+                    f"→ Resubmit when ready: /done {task_id}"
                 )
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
@@ -1068,10 +1087,12 @@ class Tasks(commands.Cog):
                 try:
                     cu = await self.bot.fetch_user(int(c["user_id"]))
                     await cu.send(
-                        f"↩️ Task sent back — growth-pm-bot\n"
+                        f"↩️ Task sent back — progsu pm bot\n"
                         f"Task #{task_id}: {task['task_name']}\n"
                         f"Feedback: {reason}\n"
-                        f"Use /done {task_id} to resubmit when ready."
+                        f"Please update your work and set a new due date if needed:\n"
+                        f"→ Update due date: /edittask {task_id} due:YYYY-MM-DD\n"
+                        f"→ Resubmit when ready: /done {task_id}"
                     )
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     pass
@@ -1085,7 +1106,13 @@ class Tasks(commands.Cog):
             await _send_generic_error(interaction)
 
     @app_commands.command(name="reviewqueue", description="See all tasks waiting for review.")
-    async def reviewqueue(self, interaction: discord.Interaction):
+    @app_commands.describe(team="Optional: filter to a specific team")
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def reviewqueue(
+        self,
+        interaction: discord.Interaction,
+        team: Optional[app_commands.Choice[str]] = None,
+    ):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -1097,25 +1124,45 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            if caller_team != "all":
-                all_team = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
-                tasks = [t for t in all_team if t["status"] == "review"]
-                tasks.sort(key=lambda t: t["created_at"])
-            else:
-                tasks = get_tasks_in_review(interaction.guild.id)
 
-            if not tasks:
+            # Fetch all review tasks within the caller's scope
+            if caller_team != "all":
+                scoped = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
+                all_tasks = [t for t in scoped if t["status"] == "review"]
+                all_tasks.sort(key=lambda t: t["created_at"])
+            else:
+                all_tasks = get_tasks_in_review(interaction.guild.id)
+
+            # Apply explicit team filter
+            if team is not None:
+                all_tasks = [t for t in all_tasks if t.get("team") == team.value]
+
+            if not all_tasks:
                 await interaction.response.send_message(
                     "✅ No tasks waiting for review.", ephemeral=True
                 )
                 return
 
+            # Determine display order of teams
+            if team is not None:
+                teams_to_show = [team.value]
+            elif caller_team == "all":
+                teams_to_show = list(TEAMS)
+            else:
+                teams_to_show = list(caller_team)
+
             lines = ["⏳ Tasks Awaiting Review:", ""]
-            for t in tasks:
-                lines.append(f"**#{t['id']} — {t['task_name']}**")
-                lines.append(f"👤 Submitted by: <@{t['assignee_id']}>")
-                lines.append(f"📅 Due: {_format_due(t['due_date'])}")
-                lines.append(f"Use /approve {t['id']} or /reject {t['id']} [reason]")
+            for team_name in teams_to_show:
+                bucket = [t for t in all_tasks if t.get("team") == team_name]
+                if not bucket:
+                    continue
+                lines.append(f"**── {team_name.capitalize()} ──**")
+                for t in bucket:
+                    lines.append(f"**#{t['id']} — {t['task_name']}**")
+                    lines.append(f"👤 Submitted by: <@{t['assignee_id']}>")
+                    lines.append(f"📅 Due: {_format_due(t['due_date'])}")
+                    lines.append(f"Use /approve {t['id']} or /reject {t['id']} [reason]")
+                    lines.append("")
                 lines.append("")
 
             await interaction.response.send_message(
@@ -1302,8 +1349,14 @@ class Tasks(commands.Cog):
     # Admin / VP task views
     # -----------------------------------------------------------------------
 
-    @app_commands.command(name="alltasks", description="List every task, grouped by member.")
-    async def alltasks(self, interaction: discord.Interaction):
+    @app_commands.command(name="alltasks", description="List every task, grouped by team and member.")
+    @app_commands.describe(team="Optional: filter to a specific team")
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def alltasks(
+        self,
+        interaction: discord.Interaction,
+        team: Optional[app_commands.Choice[str]] = None,
+    ):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -1315,37 +1368,45 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            if caller_team == "all":
-                tasks = get_all_tasks(interaction.guild.id)
-            else:
-                tasks = _get_all_tasks_for_vp(interaction.guild.id, caller_team)
-
             collab_map = get_all_task_collaborators(interaction.guild.id)
 
-            if not tasks:
+            # Determine which teams to display
+            if team is not None:
+                teams_to_show = [team.value]
+            elif caller_team == "all":
+                teams_to_show = list(TEAMS)
+            else:
+                teams_to_show = list(caller_team)
+
+            lines: list[str] = []
+            for team_name in teams_to_show:
+                team_tasks = get_all_tasks(interaction.guild.id, team=team_name)
+                if not team_tasks:
+                    continue
+                lines.append(f"**── {team_name.capitalize()} ──**")
+                grouped: dict[str, list[dict]] = {}
+                for t in team_tasks:
+                    grouped.setdefault(t["assignee_id"], []).append(t)
+                for assignee_id, items in grouped.items():
+                    sorted_items = sorted(
+                        items,
+                        key=lambda t: (
+                            STATUS_ORDER.get(t["status"], 99),
+                            t["due_date"] is None,
+                            t["due_date"] or date.max,
+                        ),
+                    )
+                    lines.append(f"**<@{assignee_id}>**")
+                    for t in sorted_items:
+                        lines.append(_task_block(t, collab_map.get(t["id"])))
+                    lines.append("")
+                lines.append("")
+
+            if not lines:
                 await interaction.response.send_message(
                     "No tasks found.", ephemeral=True
                 )
                 return
-
-            grouped: dict[str, list[dict]] = {}
-            for t in tasks:
-                grouped.setdefault(t["assignee_id"], []).append(t)
-
-            lines: list[str] = []
-            for assignee_id, items in grouped.items():
-                sorted_items = sorted(
-                    items,
-                    key=lambda t: (
-                        STATUS_ORDER.get(t["status"], 99),
-                        t["due_date"] is None,
-                        t["due_date"] or date.max,
-                    ),
-                )
-                lines.append(f"**<@{assignee_id}>**")
-                for t in sorted_items:
-                    lines.append(_task_block(t, collab_map.get(t["id"])))
-                lines.append("")
 
             chunks: list[str] = []
             current = ""
@@ -1508,14 +1569,14 @@ class Tasks(commands.Cog):
             )
 
             embed = discord.Embed(
-                title=f"📊 Growth Team Progress Report{team_label}",
+                title=f"📊 Progress Report{team_label}",
                 color=0x5865F2,
             )
             embed.add_field(name="Team Overview", value=overview, inline=False)
             embed.add_field(name="Per Person", value=per_person_text, inline=False)
             embed.add_field(name="Coming Up", value=upcoming_text, inline=False)
             embed.set_footer(
-                text=f"growth-pm-bot · Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                text=f"progsu pm bot · Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             )
 
             await interaction.response.send_message(
@@ -1528,7 +1589,13 @@ class Tasks(commands.Cog):
             await _send_generic_error(interaction)
 
     @app_commands.command(name="pingteam", description="Post all current pending tasks publicly.")
-    async def pingteam(self, interaction: discord.Interaction):
+    @app_commands.describe(team="Optional: filter to a specific team")
+    @app_commands.choices(team=TEAM_CHOICES)
+    async def pingteam(
+        self,
+        interaction: discord.Interaction,
+        team: Optional[app_commands.Choice[str]] = None,
+    ):
         try:
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -1540,7 +1607,11 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            if caller_team == "all":
+
+            if team is not None:
+                all_tasks = get_all_tasks(interaction.guild.id, team=team.value)
+                roster = get_team_members(interaction.guild.id, team=team.value)
+            elif caller_team == "all":
                 all_tasks = get_all_tasks(interaction.guild.id)
                 roster = get_team_members(interaction.guild.id)
             else:
@@ -1564,36 +1635,54 @@ class Tasks(commands.Cog):
                 else:
                     other_tasks.setdefault(t["assignee_id"], []).append(t)
 
-            role = discord.utils.get(interaction.guild.roles, name="Growth")
+            # Determine role to ping
+            team_name_for_role = (
+                team.value if team is not None
+                else (caller_team[0] if isinstance(caller_team, list) and len(caller_team) == 1 else None)
+            )
+            role = discord.utils.get(
+                interaction.guild.roles,
+                name=team_name_for_role.capitalize() if team_name_for_role else "Growth",
+            )
             ping_prefix = f"{role.mention} — " if role else ""
 
-            sections: list[str] = []
+            # Build output lines (chunk at assignee boundaries)
+            lines: list[str] = [f"{ping_prefix}here are all current pending tasks:", ""]
             for assignee_id, items in team_tasks.items():
-                section = [f"<@{assignee_id}>"]
+                lines.append(f"<@{assignee_id}>")
                 for t in items:
-                    section.append(_task_block(t, collab_map.get(t["id"])))
-                sections.append("\n".join(section))
+                    lines.append(_task_block(t, collab_map.get(t["id"])))
+                lines.append("")
 
-            body = "\n\n".join(sections) if sections else "No pending tasks for team members."
-            message = f"{ping_prefix}here are all current pending tasks:\n\n{body}"
-
-            if other_tasks and caller_team == "all":
-                other_sections: list[str] = []
+            if other_tasks and team is None and caller_team == "all":
+                lines.append("📋 Other assigned tasks (not on official team roster):")
+                lines.append("")
                 for assignee_id, items in other_tasks.items():
-                    section = [f"<@{assignee_id}>"]
+                    lines.append(f"<@{assignee_id}>")
                     for t in items:
-                        section.append(_task_block(t, collab_map.get(t["id"])))
-                    other_sections.append("\n".join(section))
-                message += (
-                    "\n\n📋 Other assigned tasks (not on official team roster):\n"
-                    + "\n\n".join(other_sections)
-                )
+                        lines.append(_task_block(t, collab_map.get(t["id"])))
+                    lines.append("")
 
-            if len(message) > 1900:
-                message = message[:1900] + "\n…(truncated)"
+            # Split into chunks ≤1900 chars at line boundaries
+            chunks: list[str] = []
+            current = ""
+            for line in lines:
+                candidate = current + "\n" + line if current else line
+                if len(candidate) > 1900:
+                    chunks.append(current)
+                    current = line
+                else:
+                    current = candidate
+            if current:
+                chunks.append(current)
 
             allowed = discord.AllowedMentions(roles=[role] if role else [], users=False)
-            await interaction.response.send_message(message, allowed_mentions=allowed)
+            await interaction.response.send_message(chunks[0], allowed_mentions=allowed)
+            for chunk in chunks[1:]:
+                await interaction.followup.send(
+                    chunk,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
 
             await self.notify_admin(
                 interaction, "pingteam",
@@ -1604,11 +1693,16 @@ class Tasks(commands.Cog):
             await _send_generic_error(interaction)
 
     @app_commands.command(name="dmtasks", description="DM team member(s) their pending tasks.")
-    @app_commands.describe(member="Optional: DM only this member")
+    @app_commands.describe(
+        member="Optional: DM only this member",
+        team="Optional: limit to a specific team",
+    )
+    @app_commands.choices(team=TEAM_CHOICES)
     async def dmtasks(
         self,
         interaction: discord.Interaction,
         member: Optional[discord.Member] = None,
+        team: Optional[app_commands.Choice[str]] = None,
     ):
         try:
             if interaction.guild is None:
@@ -1663,10 +1757,16 @@ class Tasks(commands.Cog):
                     )
                 return
 
-            if caller_team == "all":
+            # Determine team scope and which team channel to post to
+            if team is not None:
+                team_rows = get_team_members(interaction.guild.id, team=team.value)
+                dm_team: Optional[str] = team.value
+            elif caller_team == "all":
                 team_rows = get_team_members(interaction.guild.id)
+                dm_team = None  # admin with no filter — skip channel post
             else:
                 team_rows = _get_members_for_vp(interaction.guild.id, caller_team)
+                dm_team = caller_team[0] if len(caller_team) == 1 else None
 
             if not team_rows:
                 await interaction.response.send_message(
@@ -1718,6 +1818,26 @@ class Tasks(commands.Cog):
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions(users=False),
             )
+
+            # FIX 9: Post summary to team channel when a specific team is targeted
+            if dm_team and successfully_dmed:
+                channel_id = get_team_channel(str(interaction.guild.id), dm_team)
+                if channel_id:
+                    ch = self.bot.get_channel(int(channel_id))
+                    if ch:
+                        summary = (
+                            f"📣 Task reminders sent to {len(successfully_dmed)} member(s).\n"
+                            f"Delivered: {', '.join(successfully_dmed)}"
+                        )
+                        if failed_to_dm:
+                            summary += f"\nCould not reach: {', '.join(failed_to_dm)}"
+                        try:
+                            await ch.send(
+                                summary,
+                                allowed_mentions=discord.AllowedMentions(users=False),
+                            )
+                        except Exception:
+                            pass
 
             await self.notify_admin(
                 interaction, "dmtasks",
@@ -1840,12 +1960,12 @@ class Tasks(commands.Cog):
 
             remove_team_member(interaction.guild.id, member.id)
             await interaction.response.send_message(
-                f"✅ {member.mention} has been removed from the growth team."
+                f"✅ {member.mention} has been removed from the team."
             )
 
             await self.notify_admin(
                 interaction, "removemember",
-                f"Removed {member.mention} from the Growth team",
+                f"Removed {member.mention} from the team",
             )
         except Exception:
             traceback.print_exc()
@@ -1922,7 +2042,7 @@ class Tasks(commands.Cog):
                     ):
                         entry["overdue"] += 1
 
-            lines = [f"👥 Growth Team Members{team_label} ({len(team_rows)} total):", ""]
+            lines = [f"👥 Team Members{team_label} ({len(team_rows)} total):", ""]
             for row in team_rows:
                 uid = row["user_id"]
                 try:
@@ -2098,7 +2218,7 @@ class Tasks(commands.Cog):
         try:
             latency_ms = round(self.bot.latency * 1000)
             await interaction.response.send_message(
-                f"🟢 growth-pm-bot is online! Latency: {latency_ms}ms",
+                f"🟢 progsu pm bot is online! Latency: {latency_ms}ms",
                 ephemeral=True,
             )
         except Exception:

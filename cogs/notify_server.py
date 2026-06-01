@@ -31,20 +31,27 @@ async def notify_task_assigned(
     due_str = due_date if due_date else "No due date"
     collab_mentions = " ".join(f"<@{uid}>" for uid in collaborator_ids)
 
-    # Post a summary in the team channel
+    team_channel_ok = False
+    personal_channel_ok = False
+    dm_ok = False
+
+    # 1. Always post summary to team channel
     team_channel = await get_team_channel_obj(bot, guild_id, team)
     if team_channel:
-        summary = (
-            f"📋 New task assigned via dashboard\n"
-            f"**#{task_id}: {task_name}**\n"
-            f"Assigned to <@{assignee_id}> · Due: {due_str}"
-        )
-        await team_channel.send(
-            summary,
-            allowed_mentions=discord.AllowedMentions(users=False),
-        )
+        try:
+            summary = (
+                f"📋 New task assigned via dashboard\n"
+                f"**#{task_id}: {task_name}**\n"
+                f"Assigned to <@{assignee_id}> · Due: {due_str}"
+            )
+            await team_channel.send(
+                summary,
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
+            team_channel_ok = True
+        except Exception:
+            pass
 
-    # Send the full message + buttons to the member's personal/team reminder channel or DM
     member_message = (
         f"✅ Task #{task_id} assigned to <@{assignee_id}>\n"
         f"📋 {task_name}\n"
@@ -56,44 +63,52 @@ async def notify_task_assigned(
 
     view = TaskActionView(task_id, str(assignee_id), task_name, mode="member")
 
+    # 2. Post to personal reminder channel if configured
     channel_id, channel_type = get_reminder_channel(guild_id, str(assignee_id))
-
     if channel_id:
         reminder_channel = bot.get_channel(int(channel_id))
         if reminder_channel:
-            await reminder_channel.send(
-                member_message,
-                view=view,
-                allowed_mentions=discord.AllowedMentions(users=False),
-            )
-            return {"notified": True, "method": channel_type}
+            try:
+                await reminder_channel.send(
+                    member_message,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions(users=False),
+                )
+                personal_channel_ok = True
+            except Exception:
+                pass
 
+    # 3. Always try to DM the assignee directly
     try:
         user = await bot.fetch_user(int(assignee_id))
         await user.send(member_message, view=view)
-        return {"notified": True, "method": "dm"}
+        dm_ok = True
     except Exception:
-        return {
-            "notified": False,
-            "method": None,
-            "warning": "no_channel_and_dm_failed",
-        }
+        pass
+
+    return {
+        "team_channel": team_channel_ok,
+        "personal_channel": personal_channel_ok,
+        "dm": dm_ok,
+    }
 
 
 async def notify_member_added(bot, guild_id, user_id, display_name, team, added_by):
+    team_channel_ok = False
+    dm_ok = False
+
     channel = await get_team_channel_obj(bot, guild_id, team)
-
-    message = (
-        f"👋 New member added to the progsu Task Management System\n"
-        f"**{display_name}** (<@{user_id}>) has been added to the "
-        f"**{team.capitalize()}** team by {added_by}."
-    )
-
     if channel:
-        await channel.send(
-            message,
-            allowed_mentions=discord.AllowedMentions(users=False),
-        )
+        try:
+            await channel.send(
+                f"👋 New member added to the progsu Task Management System\n"
+                f"**{display_name}** (<@{user_id}>) has been added to the "
+                f"**{team.capitalize()}** team by {added_by}.",
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
+            team_channel_ok = True
+        except Exception:
+            pass
 
     try:
         user = await bot.fetch_user(int(user_id))
@@ -102,110 +117,128 @@ async def notify_member_added(bot, guild_id, user_id, display_name, team, added_
             f"You'll receive task assignments and deadline reminders here.\n"
             f"Use /mytasks anytime to see your current tasks."
         )
+        dm_ok = True
     except Exception:
         pass
 
-    return {"notified": True}
+    return {"team_channel": team_channel_ok, "personal_channel": False, "dm": dm_ok}
 
 
 async def notify_task_approved(
     bot, guild_id, task_id, task_name, assignee_id, team, approved_by
 ):
+    team_channel_ok = False
+    dm_ok = False
+
     channel = await get_team_channel_obj(bot, guild_id, team)
-
-    channel_message = (
-        f"✅ Task approved via dashboard\n"
-        f"**#{task_id}: {task_name}**\n"
-        f"<@{assignee_id}>'s task was approved by {approved_by}."
-    )
-
     if channel:
-        await channel.send(
-            channel_message,
-            allowed_mentions=discord.AllowedMentions(users=False),
-        )
+        try:
+            await channel.send(
+                f"✅ Task approved via dashboard\n"
+                f"**#{task_id}: {task_name}**\n"
+                f"<@{assignee_id}>'s task was approved by {approved_by}.",
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
+            team_channel_ok = True
+        except Exception:
+            pass
 
     try:
         user = await bot.fetch_user(int(assignee_id))
         await user.send(
-            f"✅ Task approved — progsu Task Management System\n"
+            f"✅ Task approved — progsu pm bot\n"
             f"Your task has been reviewed and approved!\n"
             f"Task #{task_id}: {task_name}\n"
             f"Great work!"
         )
+        dm_ok = True
     except Exception:
         pass
 
-    return {"notified": True}
+    return {"team_channel": team_channel_ok, "personal_channel": False, "dm": dm_ok}
 
 
 async def notify_task_rejected(
     bot, guild_id, task_id, task_name, assignee_id, team, rejected_by, reason
 ):
+    team_channel_ok = False
+    dm_ok = False
+
     channel = await get_team_channel_obj(bot, guild_id, team)
-
-    channel_message = (
-        f"↩️ Task sent back via dashboard\n"
-        f"**#{task_id}: {task_name}**\n"
-        f"<@{assignee_id}>'s task was sent back by {rejected_by}.\n"
-        f"Reason: {reason}"
-    )
-
     if channel:
-        await channel.send(
-            channel_message,
-            allowed_mentions=discord.AllowedMentions(users=False),
-        )
+        try:
+            await channel.send(
+                f"↩️ Task sent back via dashboard\n"
+                f"**#{task_id}: {task_name}**\n"
+                f"<@{assignee_id}>'s task was sent back by {rejected_by}.\n"
+                f"Reason: {reason}",
+                allowed_mentions=discord.AllowedMentions(users=False),
+            )
+            team_channel_ok = True
+        except Exception:
+            pass
 
     try:
         user = await bot.fetch_user(int(assignee_id))
         await user.send(
-            f"↩️ Task sent back — progsu Task Management System\n"
+            f"↩️ Task sent back — progsu pm bot\n"
             f"Your task has been reviewed and needs more work:\n"
             f"Task #{task_id}: {task_name}\n"
             f"Feedback: {reason}\n"
-            f"Update your work and resubmit with /done {task_id} when ready."
+            f"Please update your work and set a new due date if needed:\n"
+            f"→ Update due date: /edittask {task_id} due:YYYY-MM-DD\n"
+            f"→ Resubmit when ready: /done {task_id}"
         )
+        dm_ok = True
     except Exception:
         pass
 
-    return {"notified": True}
+    return {"team_channel": team_channel_ok, "personal_channel": False, "dm": dm_ok}
 
 
 async def notify_task_edited(
     bot, guild_id, task_id, task_name, assignee_id, team, edited_by, changes
 ):
-    channel = await get_team_channel_obj(bot, guild_id, team)
+    team_channel_ok = False
 
+    channel = await get_team_channel_obj(bot, guild_id, team)
     if not channel:
-        return {"notified": False}
+        return {"team_channel": False, "personal_channel": False, "dm": False}
 
     changes_str = "\n".join(f"  {k}: {v}" for k, v in changes.items())
+    try:
+        await channel.send(
+            f"✏️ Task updated via dashboard\n"
+            f"**#{task_id}: {task_name}**\n"
+            f"Updated by {edited_by}:\n"
+            f"{changes_str}",
+            allowed_mentions=discord.AllowedMentions(users=False),
+        )
+        team_channel_ok = True
+    except Exception:
+        pass
 
-    await channel.send(
-        f"✏️ Task updated via dashboard\n"
-        f"**#{task_id}: {task_name}**\n"
-        f"Updated by {edited_by}:\n"
-        f"{changes_str}",
-        allowed_mentions=discord.AllowedMentions(users=False),
-    )
-
-    return {"notified": True}
+    return {"team_channel": team_channel_ok, "personal_channel": False, "dm": False}
 
 
 async def notify_task_deleted(bot, guild_id, task_id, task_name, team, deleted_by):
+    team_channel_ok = False
+
     channel = await get_team_channel_obj(bot, guild_id, team)
-
     if not channel:
-        return {"notified": False}
+        return {"team_channel": False, "personal_channel": False, "dm": False}
 
-    await channel.send(
-        f"🗑️ Task deleted via dashboard\n"
-        f"**#{task_id}: {task_name}** was deleted by {deleted_by}.",
-        allowed_mentions=discord.AllowedMentions(users=False),
-    )
+    try:
+        await channel.send(
+            f"🗑️ Task deleted via dashboard\n"
+            f"**#{task_id}: {task_name}** was deleted by {deleted_by}.",
+            allowed_mentions=discord.AllowedMentions(users=False),
+        )
+        team_channel_ok = True
+    except Exception:
+        pass
 
-    return {"notified": True}
+    return {"team_channel": team_channel_ok, "personal_channel": False, "dm": False}
 
 
 async def handle_notify(request):

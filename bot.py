@@ -31,6 +31,7 @@ class PMBot(commands.Bot):
         from cogs.notify_server import start_notify_server
         self.add_view(TaskActionView(0, "0", "", mode="member"))
         self.add_view(TaskActionView(0, "0", "", mode="review"))
+        print("✅ Persistent views registered")
         await start_notify_server(self)
 
 
