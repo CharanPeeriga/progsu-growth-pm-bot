@@ -815,11 +815,12 @@ def get_tasks_as_collaborator(guild_id, user_id):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT t.id, t.guild_id, t.assignee_id, t.task_name,
-                       t.due_date, t.status, t.created_at, t.rejection_reason,
+                SELECT t.id, t.guild_id, t.assignee_id, t.assigner_id,
+                       t.task_name, t.due_date, t.status, t.created_at,
+                       t.rejection_reason, t.team,
                        tc.submitted, tc.submitted_at
                 FROM tasks t
-                JOIN task_collaborators tc ON t.id = tc.task_id AND tc.user_id = %s
+                JOIN task_collaborators tc ON tc.task_id = t.id AND tc.user_id = %s
                 WHERE t.guild_id = %s
                 ORDER BY t.due_date NULLS LAST, t.created_at
                 """,

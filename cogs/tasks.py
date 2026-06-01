@@ -521,12 +521,11 @@ class Tasks(commands.Cog):
             member_view = TaskActionView(task_id, str(member.id), task, mode="member")
 
             if collab_ids:
-                collab_mentions = ", ".join(f"<@{uid}>" for uid in collab_ids)
+                all_mentions = [member.mention] + [f"<@{uid}>" for uid in collab_ids]
                 await interaction.response.send_message(
-                    f"✅ Task #{task_id} assigned to {member.mention}\n"
+                    f"✅ Task #{task_id} assigned to {', '.join(all_mentions)}\n"
                     f"📋 {task}\n"
-                    f"📅 Due: {due_str}\n"
-                    f"🤝 Collaborators: {collab_mentions}"
+                    f"📅 Due: {due_str}"
                     + assignee_team_warn,
                     view=member_view,
                 )
@@ -539,28 +538,33 @@ class Tasks(commands.Cog):
                     view=member_view,
                 )
 
-            try:
-                await member.send(
-                    f"📋 New task assigned by {interaction.user.display_name}\n"
-                    f"Task #{task_id}: {task}\n"
-                    f"Due: {due_str}\n"
-                    f"Use /done {task_id} to submit for review when complete."
-                )
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-
-            for uid in collab_ids:
-                try:
-                    collab_user = await self.bot.fetch_user(int(uid))
-                    await collab_user.send(
-                        f"🤝 You've been added as a collaborator on a new task by "
-                        f"{interaction.user.display_name}:\n"
+            if collab_ids:
+                # Everyone (assignee + collaborators) gets the same DM format
+                all_participant_ids = [str(member.id)] + collab_ids
+                for uid in all_participant_ids:
+                    other_ids = [u for u in all_participant_ids if u != uid]
+                    other_mentions = ", ".join(f"<@{u}>" for u in other_ids)
+                    dm_msg = (
+                        f"📋 New task assigned by {interaction.user.display_name}\n"
                         f"Task #{task_id}: {task}\n"
                         f"Due: {due_str}\n"
-                        f"Primary assignee: {member.mention}\n"
+                        f"Others working on this: {other_mentions}\n"
                         f"Use /done {task_id} when your part is complete."
                     )
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    try:
+                        user = await self.bot.fetch_user(int(uid))
+                        await user.send(dm_msg)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        pass
+            else:
+                try:
+                    await member.send(
+                        f"📋 New task assigned by {interaction.user.display_name}\n"
+                        f"Task #{task_id}: {task}\n"
+                        f"Due: {due_str}\n"
+                        f"Use /done {task_id} to submit for review when complete."
+                    )
+                except (discord.Forbidden, discord.HTTPException):
                     pass
 
             await self.notify_admin(
@@ -586,63 +590,74 @@ class Tasks(commands.Cog):
                 return
 
             tasks = get_tasks_by_user(interaction.guild.id, interaction.user.id)
-            my_collab_tasks = get_tasks_as_collaborator(
+            collab_tasks = get_tasks_as_collaborator(
                 interaction.guild.id, interaction.user.id
             )
 
-            if not tasks and not my_collab_tasks:
+            if not tasks and not collab_tasks:
                 await interaction.response.send_message(
                     "🎉 You have no tasks!", ephemeral=True
                 )
                 return
 
-            pending = sorted(
-                [t for t in tasks if t["status"] in ("todo", "in_progress")],
+            # Collab tasks not already appearing as assigned tasks
+            assigned_ids = {t["id"] for t in tasks}
+            collab_by_id = {
+                ct["id"]: ct for ct in collab_tasks if ct["id"] not in assigned_ids
+            }
+
+            # Build merged sections
+            all_pending = sorted(
+                [t for t in tasks if t["status"] in ("todo", "in_progress")]
+                + [ct for ct in collab_by_id.values() if ct["status"] in ("todo", "in_progress")],
                 key=lambda t: (t["due_date"] is None, t["due_date"] or date.max),
             )
-            in_review = [t for t in tasks if t["status"] == "review"]
-            done_tasks = sorted(
-                [t for t in tasks if t["status"] == "done"],
+            all_review = (
+                [t for t in tasks if t["status"] == "review"]
+                + [ct for ct in collab_by_id.values() if ct["status"] == "review"]
+            )
+            all_done = sorted(
+                [t for t in tasks if t["status"] == "done"]
+                + [ct for ct in collab_by_id.values() if ct["status"] == "done"],
                 key=lambda t: t["id"],
                 reverse=True,
             )[:5]
 
             lines: list[str] = []
 
-            if pending:
+            if all_pending:
                 lines.append("📋 Your Pending Tasks:")
-                for t in pending:
-                    lines.append(_task_line(t))
-                lines.append("")
-
-            if in_review:
-                lines.append("⏳ Awaiting Review:")
-                for t in in_review:
-                    lines.append(_task_line(t))
-                lines.append("")
-
-            if done_tasks:
-                lines.append("✅ Recently Completed:")
-                for t in done_tasks:
-                    lines.append(_task_line(t))
-                lines.append("")
-
-            if my_collab_tasks:
-                lines.append("🤝 Collaborating On:")
-                for ct in my_collab_tasks:
-                    emoji = STATUS_EMOJI.get(ct["status"], "🔵")
-                    task_label = (
-                        f"{emoji} #{ct['id']} — {ct['task_name']} "
-                        f"· Due: {_format_due(ct['due_date'])}"
-                    )
-                    all_c = get_collaborators(ct["id"])
-                    for c in all_c:
-                        icon = "✅" if c["submitted"] else "⏳"
-                        if c["user_id"] == str(interaction.user.id):
-                            task_label += f"\n   {icon} You"
+                for t in all_pending:
+                    if t["id"] in collab_by_id:
+                        submitted = collab_by_id[t["id"]].get("submitted", False)
+                        if submitted:
+                            line = (
+                                f"⏳ #{t['id']} — {t['task_name']} "
+                                f"· Due: {_format_due(t['due_date'])} · 🤝 waiting on others"
+                            )
                         else:
-                            task_label += f"\n   {icon} <@{c['user_id']}>"
-                    lines.append(task_label)
+                            emoji = STATUS_EMOJI.get(t["status"], "🔵")
+                            line = (
+                                f"{emoji} #{t['id']} — {t['task_name']} "
+                                f"· Due: {_format_due(t['due_date'])} · 🤝 team task"
+                            )
+                        if t.get("rejection_reason"):
+                            line += f"\n   ↩️ Sent back: {t['rejection_reason']}"
+                        lines.append(line)
+                    else:
+                        lines.append(_task_line(t))
+                lines.append("")
+
+            if all_review:
+                lines.append("⏳ Awaiting Review:")
+                for t in all_review:
+                    lines.append(_task_line(t))
+                lines.append("")
+
+            if all_done:
+                lines.append("✅ Recently Completed:")
+                for t in all_done:
+                    lines.append(_task_line(t))
                 lines.append("")
 
             if not lines:
@@ -733,8 +748,21 @@ class Tasks(commands.Cog):
 
                 lines = [f"📋 Pending tasks for {member.mention}:"]
                 for t in pending:
-                    prefix = "🤝 " if t["id"] in collab_only_ids else ""
-                    lines.append(prefix + _task_block(t, collab_map.get(t["id"])))
+                    if t["id"] in collab_only_ids:
+                        emoji = STATUS_EMOJI.get(t["status"], "🔵")
+                        task_collabs = collab_map.get(t["id"], [])
+                        n_others = len(task_collabs)
+                        line = (
+                            f"{emoji} #{t['id']} — {t['task_name']} "
+                            f"· Due: {_format_due(t['due_date'])} "
+                            f"· 🤝 <@{t['assignee_id']}>"
+                            + (f" + {n_others} other(s)" if n_others > 0 else "")
+                        )
+                        if t.get("rejection_reason"):
+                            line += f"\n   ↩️ Sent back: {t['rejection_reason']}"
+                        lines.append(line)
+                    else:
+                        lines.append(_task_block(t, collab_map.get(t["id"])))
 
                 await interaction.response.send_message(
                     "\n".join(lines),
@@ -817,12 +845,25 @@ class Tasks(commands.Cog):
 
             if collabs:
                 if is_collab:
+                    # Check if user already submitted their part
+                    user_collab = next(
+                        (c for c in collabs if c["user_id"] == str(interaction.user.id)),
+                        None,
+                    )
+                    if user_collab and user_collab["submitted"]:
+                        remaining = get_pending_collaborators(task_id)
+                        await interaction.response.send_message(
+                            f"⏳ You already submitted your part of task #{task_id}.\n"
+                            f"Waiting on {len(remaining)} more person(s) before it goes to review.",
+                            ephemeral=True,
+                        )
+                        return
                     submit_collaborator(task_id, interaction.user.id)
 
                 if all_collaborators_submitted(task_id):
                     update_task_status(task_id, "review")
                     await interaction.response.send_message(
-                        f"⏳ All collaborators submitted — task #{task_id} is now in review:\n"
+                        f"✅ Task #{task_id} submitted for review — all members complete.\n"
                         f"📋 {task['task_name']}\n"
                         f"Waiting for admin approval."
                     )
@@ -855,12 +896,12 @@ class Tasks(commands.Cog):
                         f"All collaborators submitted task #{task_id}: {task['task_name']}",
                     )
                 else:
-                    pending = get_pending_collaborators(task_id)
-                    pending_mentions = ", ".join(f"<@{uid}>" for uid in pending)
+                    remaining = get_pending_collaborators(task_id)
                     await interaction.response.send_message(
-                        f"⏳ Your part is submitted. Still waiting on:\n{pending_mentions}",
+                        f"✅ Marked as done on your end.\n"
+                        f"Task #{task_id} is waiting on {len(remaining)} more person(s) "
+                        f"before going to review.",
                         ephemeral=True,
-                        allowed_mentions=discord.AllowedMentions(users=False),
                     )
             else:
                 update_task_status(task_id, "review")
