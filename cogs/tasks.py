@@ -436,7 +436,7 @@ class Tasks(commands.Cog):
         task="Task description",
         due="Optional due date (YYYY-MM-DD)",
         collaborators="Optional: mention collaborators e.g. @user1 @user2",
-        team="Team for the task (required if you are VP of multiple teams)",
+        team="Team for the task (required for admins and VPs of multiple teams)",
     )
     @app_commands.choices(team=TEAM_CHOICES)
     async def assign(
@@ -460,7 +460,13 @@ class Tasks(commands.Cog):
 
             caller_team = await get_caller_team(interaction)
             if caller_team == "all":
-                effective_team = team.value if team is not None else "growth"
+                if team is None:
+                    await interaction.response.send_message(
+                        "⚠️ Please specify a team with the `team:` parameter.",
+                        ephemeral=True,
+                    )
+                    return
+                effective_team = team.value
             elif team is not None:
                 if team.value not in caller_team:
                     await interaction.response.send_message(
@@ -1896,14 +1902,14 @@ class Tasks(commands.Cog):
     @app_commands.command(name="addmember", description="Add a member to the team roster.")
     @app_commands.describe(
         member="Member to add",
-        team="Team to add them to (required if you are VP of multiple teams)",
+        team="Team to add them to",
     )
     @app_commands.choices(team=TEAM_CHOICES)
     async def addmember(
         self,
         interaction: discord.Interaction,
         member: discord.Member,
-        team: Optional[app_commands.Choice[str]] = None,
+        team: app_commands.Choice[str],
     ):
         try:
             if interaction.guild is None:
@@ -1916,23 +1922,12 @@ class Tasks(commands.Cog):
                 return
 
             caller_team = await get_caller_team(interaction)
-            if caller_team == "all":
-                effective_team = team.value if team is not None else "growth"
-            elif team is not None:
-                if team.value not in caller_team:
-                    await interaction.response.send_message(
-                        "❌ You can only add members to your own team.", ephemeral=True
-                    )
-                    return
-                effective_team = team.value
-            elif len(caller_team) > 1:
+            if caller_team != "all" and team.value not in caller_team:
                 await interaction.response.send_message(
-                    "⚠️ You are VP of multiple teams. Please specify a team with the `team:` parameter.",
-                    ephemeral=True,
+                    "❌ You can only add members to your own team.", ephemeral=True
                 )
                 return
-            else:
-                effective_team = caller_team[0]
+            effective_team = team.value
 
             if is_team_member(interaction.guild.id, member.id):
                 await interaction.response.send_message(
